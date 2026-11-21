@@ -1,6 +1,6 @@
 import Foundation
 
-struct DryRunReport: Encodable {
+struct BacklogReport: Encodable {
     let cutoffEpochMilliseconds: Int64
     let entries: [Entry]
 
@@ -10,13 +10,32 @@ struct DryRunReport: Encodable {
         let forwardedCopyID: String?
         let forwardedCopyLabelIDs: [String]?
         let outcome: Outcome
+        let messageID: String?
 
-        init(original: GmailMessage, copy: GmailMessage? = nil, outcome: Outcome) {
+        private enum CodingKeys: String, CodingKey {
+            case originalID, originalLabelIDs, forwardedCopyID, forwardedCopyLabelIDs, outcome
+        }
+
+        init(original: GmailMessage, copy: GmailMessage? = nil, messageID: String? = nil, outcome: Outcome) {
             originalID = original.id
             originalLabelIDs = (original.labelIds ?? []).sorted()
             forwardedCopyID = copy?.id
             forwardedCopyLabelIDs = copy.map { ($0.labelIds ?? []).sorted() }
+            self.messageID = messageID
             self.outcome = outcome
+        }
+
+        init(saved: RolloutState.Message, outcome: Outcome) {
+            originalID = saved.originalID
+            originalLabelIDs = []
+            forwardedCopyID = saved.copyID
+            forwardedCopyLabelIDs = nil
+            messageID = nil
+            self.outcome = outcome
+        }
+
+        func matches(_ saved: RolloutState.Message) -> Bool {
+            forwardedCopyID != nil && forwardedCopyID == saved.copyID && messageID == saved.messageID
         }
     }
 
@@ -28,16 +47,43 @@ struct DryRunReport: Encodable {
         case ambiguousOriginal
         case ambiguousCopy
         case copyAlreadyRead
+        case markedRead
+        case completed
+        case matchChanged
+        case originalUnavailable
     }
 
-    static func preview(
-        primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64
+    func json() throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(self), as: UTF8.self)
+    }
+
+    func rechecking(_ backlog: [RolloutState.Message]) -> Self {
+        let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.originalID, $0) })
+        let checked = backlog.map { saved -> Entry in
+            guard let current = byID[saved.originalID] else {
+                return Entry(saved: saved, outcome: .originalUnavailable)
+            }
+            if current.forwardedCopyID != nil, !current.matches(saved) {
+                return Entry(saved: saved, outcome: .matchChanged)
+            }
+            return current
+        }
+        return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds, entries: checked)
+    }
+
+    static func scan(
+        primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64,
+        originalIDs: Set<String>? = nil
     ) async throws -> Self {
+        if originalIDs?.isEmpty == true { return Self(cutoffEpochMilliseconds: cutoff, entries: []) }
         let originals = try await primary.messages(labelID: labelID)
             .filter { $0.labelIds?.contains(labelID) == true }
             .map(IndexedMessage.init)
         let originalIndex = index(originals)
         let eligibleOriginals = try originals.filter { original in
+            if let originalIDs, !originalIDs.contains(original.message.id) { return false }
             guard let rawDate = original.message.internalDate, let date = Int64(rawDate) else {
                 throw RelayError("Gmail returned an original without a valid internal date.")
             }
@@ -60,10 +106,10 @@ struct DryRunReport: Encodable {
                 return Entry(original: original.message, outcome: .ambiguousOriginal)
             }
             guard let candidates = copyIndex[id], let copy = candidates.first else {
-                return Entry(original: original.message, outcome: .missingCopy)
+                return Entry(original: original.message, messageID: id, outcome: .missingCopy)
             }
             guard candidates.count == 1, copy.messageID == id else {
-                return Entry(original: original.message, outcome: .ambiguousCopy)
+                return Entry(original: original.message, messageID: id, outcome: .ambiguousCopy)
             }
 
             let outcome: Outcome
@@ -74,7 +120,7 @@ struct DryRunReport: Encodable {
             } else {
                 outcome = .copyAlreadyRead
             }
-            return Entry(original: original.message, copy: copy.message, outcome: outcome)
+            return Entry(original: original.message, copy: copy.message, messageID: id, outcome: outcome)
         }
 
         return Self(cutoffEpochMilliseconds: cutoff, entries: entries.sorted { $0.originalID < $1.originalID })
@@ -91,7 +137,7 @@ struct DryRunReport: Encodable {
     }
 }
 
-private struct IndexedMessage {
+struct IndexedMessage {
     // Match modern RFC 5322 Message-IDs exactly. A malformed field can still
     // introduce a candidate and block a match, but cannot establish a match.
     private static let pattern = try! NSRegularExpression(

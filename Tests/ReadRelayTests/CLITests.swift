@@ -1,7 +1,48 @@
 import Foundation
+import SQLite3
 import XCTest
 
 final class CLITests: XCTestCase {
+    func testSyncRequiresExplicitWriteConfigurationAndASuccessfulPreview() throws {
+        let directory = try temporaryDirectory()
+        let config = directory.appendingPathComponent("config.json")
+        let state = directory.appendingPathComponent("state.sqlite")
+        let arguments = ["sync", "--config", config.path, "--state", state.path]
+
+        let disabled = """
+            {"primaryEmail":"primary@example.com","secondaryEmail":"secondary@example.com",
+             "primaryOAuthClientFile":"unused.json","secondaryOAuthClientFile":"unused.json"}
+            """
+        try Data(disabled.utf8).write(to: config)
+        let unconfirmed = try runCLI(arguments)
+        XCTAssertNotEqual(unconfirmed.status, 0)
+        XCTAssertTrue(unconfirmed.error.contains("--apply"), unconfirmed.error)
+
+        let notEnabled = try runCLI(arguments + ["--apply"])
+        XCTAssertNotEqual(notEnabled.status, 0)
+        XCTAssertTrue(notEnabled.error.contains("enableWrites"), notEnabled.error)
+
+        let enabled = disabled.replacingOccurrences(of: "{", with: "{\"enableWrites\":true,")
+        try Data(enabled.utf8).write(to: config)
+        let unpreviewed = try runCLI(arguments + ["--apply"])
+        XCTAssertNotEqual(unpreviewed.status, 0)
+        XCTAssertTrue(unpreviewed.error.contains("successful dry run"), unpreviewed.error)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+
+        // A state file from the original CLI has a cutoff but no saved preview.
+        var legacy: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(state.path, &legacy), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(legacy, """
+            CREATE TABLE rollout (singleton INTEGER PRIMARY KEY, primary_email TEXT,
+                                  secondary_email TEXT, cutoff_ms INTEGER);
+            INSERT INTO rollout VALUES (1, 'primary@example.com', 'secondary@example.com', 1700000000000);
+            """, nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(legacy), SQLITE_OK)
+        let cutoffOnly = try runCLI(arguments + ["--apply"])
+        XCTAssertNotEqual(cutoffOnly.status, 0)
+        XCTAssertTrue(cutoffOnly.error.contains("successful dry run"), cutoffOnly.error)
+    }
+
     func testDryRunRejectsTheSameMailboxInBothRoles() throws {
         let directory = try temporaryDirectory()
         let config = directory.appendingPathComponent("config.json")
@@ -83,6 +124,92 @@ final class CLITests: XCTestCase {
             let after = try XCTUnwrap(repeated.entries.first { $0.originalID == expected.originalID })
             XCTAssertEqual(before, after)
         }
+    }
+
+    func testSyncMarksOnlyTheSelectedSeededCopyAndCanBeRerun() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["READRELAY_SEEDED_APPLY"] == "1" else {
+            throw XCTSkip("Set READRELAY_SEEDED_APPLY=1 to deliberately change a seeded forwarded copy.")
+        }
+        let config = try XCTUnwrap(environment["READRELAY_SEEDED_TEST_CONFIG"])
+        let path = try XCTUnwrap(environment["READRELAY_SEEDED_WRITE_EXPECTATIONS"])
+        let expectations = try JSONDecoder().decode(
+            [SeedExpectation].self, from: Data(contentsOf: URL(fileURLWithPath: path))
+        )
+        let targets = expectations.filter { $0.outcome == "wouldMarkRead" }
+        XCTAssertEqual(targets.count, 1)
+        let target = try XCTUnwrap(targets.count == 1 ? targets.first : nil)
+        let copyID = try XCTUnwrap(target.forwardedCopyID)
+        let control = try XCTUnwrap(expectations.first { $0.outcome == "originalUnread" && $0.forwardedCopyID != nil })
+        XCTAssertNotEqual(target.originalID, control.originalID)
+        XCTAssertNotEqual(copyID, control.forwardedCopyID)
+
+        let state = try temporaryDirectory().appendingPathComponent("state.sqlite")
+        let options = ["--config", config, "--state", state.path]
+        let before = try successfulReport(["dry-run"] + options)
+        for expected in expectations {
+            let entry = try XCTUnwrap(before.entries.first { $0.originalID == expected.originalID })
+            guard entry.outcome == expected.outcome, entry.forwardedCopyID == expected.forwardedCopyID else {
+                XCTFail("Seeded Gmail labels or pair identifiers differ from the write expectations.")
+                return
+            }
+        }
+        let comparison = try XCTUnwrap(before.entries.first { $0.originalID == control.originalID })
+        guard comparison.forwardedCopyLabelIDs?.contains("UNREAD") == true else {
+            XCTFail("The comparison copy must start unread.")
+            return
+        }
+
+        // A second preview preserves pending progress independently of the first
+        // write, reproducing the local state left by an interrupted save.
+        let pendingState = state.deletingLastPathComponent().appendingPathComponent("pending.sqlite")
+        let pendingOptions = ["--config", config, "--state", pendingState.path]
+        let pending = try successfulReport(["dry-run"] + pendingOptions)
+        guard pending.entries.first(where: { $0.originalID == target.originalID })?.outcome == "wouldMarkRead",
+              pending.entries.first(where: { $0.originalID == target.originalID })?.forwardedCopyID == copyID else {
+            XCTFail("The second preview must capture the same pending write.")
+            return
+        }
+
+        let sync = ["sync", "--apply", "--original-id", target.originalID, "--copy-id", copyID]
+        let applied = try successfulReport(sync + options)
+        XCTAssertEqual(applied.cutoffEpochMilliseconds, before.cutoffEpochMilliseconds)
+        XCTAssertEqual(applied.entries.count, 1)
+        XCTAssertEqual(applied.entries.first?.forwardedCopyID, copyID)
+        XCTAssertEqual(applied.entries.first?.outcome, "markedRead")
+
+        let after = try successfulReport(["dry-run"] + options)
+        XCTAssertEqual(after.cutoffEpochMilliseconds, before.cutoffEpochMilliseconds)
+        XCTAssertEqual(after.entries.map(\.originalID), before.entries.map(\.originalID))
+        for previous in before.entries {
+            let current = try XCTUnwrap(after.entries.first { $0.originalID == previous.originalID })
+            if previous.originalID == target.originalID {
+                XCTAssertEqual(current.originalLabelIDs, previous.originalLabelIDs)
+                XCTAssertEqual(current.forwardedCopyID, copyID)
+                XCTAssertEqual(current.forwardedCopyLabelIDs, previous.forwardedCopyLabelIDs?.filter { $0 != "UNREAD" })
+                XCTAssertEqual(current.outcome, "copyAlreadyRead")
+            } else {
+                XCTAssertEqual(current, previous)
+            }
+        }
+
+        let recovered = try successfulReport(sync + pendingOptions)
+        XCTAssertEqual(recovered.cutoffEpochMilliseconds, pending.cutoffEpochMilliseconds)
+        XCTAssertEqual(recovered.entries.count, 1)
+        XCTAssertEqual(recovered.entries.first?.forwardedCopyID, copyID)
+        XCTAssertEqual(recovered.entries.first?.outcome, "copyAlreadyRead")
+
+        let repeated = try successfulReport(sync + options)
+        XCTAssertEqual(repeated.cutoffEpochMilliseconds, before.cutoffEpochMilliseconds)
+        XCTAssertEqual(repeated.entries.count, 1)
+        XCTAssertEqual(repeated.entries.first?.outcome, "completed")
+        XCTAssertEqual(try successfulReport(["dry-run"] + options).entries, after.entries)
+    }
+
+    private func successfulReport(_ arguments: [String]) throws -> Preview {
+        let result = try runCLI(arguments)
+        XCTAssertEqual(result.status, 0, result.error)
+        return try JSONDecoder().decode(Preview.self, from: result.output)
     }
 
     private struct SeedExpectation: Decodable {

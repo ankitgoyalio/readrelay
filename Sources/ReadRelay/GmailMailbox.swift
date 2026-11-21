@@ -80,7 +80,7 @@ struct GmailMailbox: Sendable {
         }
     }
 
-    private func message(id: String) async throws -> GmailMessage {
+    func message(id: String) async throws -> GmailMessage {
         let message: GmailMessage = try await get("messages/\(id)", query: [
             URLQueryItem(name: "format", value: "metadata"),
             URLQueryItem(name: "metadataHeaders", value: "Message-ID"),
@@ -92,13 +92,34 @@ struct GmailMailbox: Sendable {
         return message
     }
 
+    func markRead(id: String) async throws -> GmailMessage {
+        guard role == .secondary else {
+            throw RelayError("Only the secondary mailbox can be modified.")
+        }
+        let fields = [URLQueryItem(name: "fields", value: "id,labelIds")]
+        var request = requestFor("messages/\(id)/modify", query: fields)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(#"{"removeLabelIds":["UNREAD"]}"#.utf8)
+        let updated: GmailMessage = try await GoogleHTTP.read(request, operation: "secondary Gmail message modification")
+        guard updated.id == id, !updated.isUnread else {
+            throw RelayError("Gmail did not confirm removal of UNREAD from the forwarded copy.")
+        }
+        return updated
+    }
+
     private func get<Value: Decodable>(_ path: String, query: [URLQueryItem]) async throws -> Value {
+        try await GoogleHTTP.read(requestFor(path, query: query),
+                                  operation: "\(role.rawValue) Gmail \(path.split(separator: "/")[0]) request")
+    }
+
+    private func requestFor(_ path: String, query: [URLQueryItem]) -> URLRequest {
         let endpoint = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me")!
         var url = URLComponents(url: endpoint.appending(path: path), resolvingAgainstBaseURL: false)!
         url.queryItems = query
-        var request = URLRequest(url: url.url!)
+        var request = URLRequest(url: url.url!, cachePolicy: .reloadIgnoringLocalCacheData)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        return try await GoogleHTTP.read(request, operation: "\(role.rawValue) Gmail \(path.split(separator: "/")[0]) request")
+        return request
     }
 }
 

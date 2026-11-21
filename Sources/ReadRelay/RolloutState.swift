@@ -1,80 +1,200 @@
+import Darwin
 import Foundation
 import SQLite3
 
-struct RolloutState {
-    let path: String
+final class RolloutState {
+    struct Message {
+        let originalID: String
+        let copyID: String?
+        let messageID: String?
+        let completed: Bool
+    }
 
-    /// Keep the reviewed starting point stable across previews and the first live sync.
-    func cutoff(for configuration: Configuration, startedAt: Date) throws -> Int64 {
+    private let database: OpaquePointer
+    let cutoff: Int64
+
+    init(path: String, configuration: Configuration, previewStartedAt: Date? = nil) throws {
         guard !path.isEmpty else { throw RelayError("Provide a path for the SQLite rollout state.") }
         let filePath = URL(fileURLWithPath: path).path
-        var database: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
-        let status = sqlite3_open_v2(filePath, &database, flags, nil)
-        defer { sqlite3_close(database) }
-        guard status == SQLITE_OK, let database else {
+        let create = previewStartedAt != nil
+        if !create, !FileManager.default.fileExists(atPath: filePath) {
+            throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+        }
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | (create ? SQLITE_OPEN_CREATE : 0)
+        let status = sqlite3_open_v2(filePath, &handle, flags, nil)
+        guard status == SQLITE_OK, let handle else {
+            sqlite3_close(handle)
             throw RelayError("Could not open the SQLite rollout state (status \(status)).")
         }
 
         let primary = configuration.primaryEmail.lowercased()
         let secondary = configuration.secondaryEmail.lowercased()
-        let fiveDays: TimeInterval = 5 * 24 * 60 * 60
-        let initialCutoff = Int64(startedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
-
-        sqlite3_busy_timeout(database, 5_000)
-        try execute("""
-            CREATE TABLE IF NOT EXISTS rollout (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                primary_email TEXT NOT NULL,
-                secondary_email TEXT NOT NULL,
-                cutoff_ms INTEGER NOT NULL
-            )
-            """, in: database)
-        try execute("BEGIN IMMEDIATE", in: database)
+        sqlite3_busy_timeout(handle, 5_000)
         do {
-            try prepare("""
-                INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms)
-                VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO NOTHING
-                """, in: database) { statement in
-                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-                guard sqlite3_bind_text(statement, 1, primary, -1, transient) == SQLITE_OK,
-                      sqlite3_bind_text(statement, 2, secondary, -1, transient) == SQLITE_OK,
-                      sqlite3_bind_int64(statement, 3, initialCutoff) == SQLITE_OK,
-                      sqlite3_step(statement) == SQLITE_DONE else {
-                    throw RelayError("Could not save the initial cutoff.")
+            if let previewStartedAt {
+                let fiveDays: TimeInterval = 5 * 24 * 60 * 60
+                let initialCutoff = Int64(previewStartedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
+                try Self.execute("""
+                    CREATE TABLE IF NOT EXISTS rollout (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        primary_email TEXT NOT NULL,
+                        secondary_email TEXT NOT NULL,
+                        cutoff_ms INTEGER NOT NULL
+                    )
+                    """, in: handle)
+                try Self.prepare("""
+                    INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms)
+                    VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO NOTHING
+                    """, in: handle) { statement in
+                    try Self.bind(primary, to: statement, at: 1)
+                    try Self.bind(secondary, to: statement, at: 2)
+                    guard sqlite3_bind_int64(statement, 3, initialCutoff) == SQLITE_OK else {
+                        throw RelayError("Could not bind the initial cutoff.")
+                    }
+                    try Self.finish(statement)
                 }
+            } else if try !Self.hasTable("rollout", in: handle) {
+                throw RelayError("Run a successful dry run with this SQLite state before syncing.")
             }
-            let saved = try prepare(
+
+            cutoff = try Self.prepare(
                 "SELECT primary_email, secondary_email, cutoff_ms FROM rollout WHERE singleton = 1",
-                in: database
+                in: handle
             ) { statement in
                 guard sqlite3_step(statement) == SQLITE_ROW,
-                      let savedPrimary = sqlite3_column_text(statement, 0),
-                      let savedSecondary = sqlite3_column_text(statement, 1),
                       sqlite3_column_type(statement, 2) == SQLITE_INTEGER else {
-                    throw RelayError("Could not load the initial cutoff.")
+                    throw RelayError("Could not load the initial cutoff. Run a successful dry run before syncing.")
                 }
-                guard String(cString: savedPrimary) == primary, String(cString: savedSecondary) == secondary else {
+                guard Self.columnText(statement, 0) == primary, Self.columnText(statement, 1) == secondary else {
                     throw RelayError("The SQLite rollout state belongs to a different mailbox pair.")
                 }
                 return sqlite3_column_int64(statement, 2)
             }
-            try execute("COMMIT", in: database)
-            return saved
         } catch {
-            try? execute("ROLLBACK", in: database)
+            sqlite3_close(handle)
+            throw error
+        }
+        database = handle
+    }
+
+    deinit { sqlite3_close(database) }
+
+    static func withSyncLock<Value>(path: String, run: () async throws -> Value) async throws -> Value {
+        let databasePath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let descriptor = open(databasePath + ".sync.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw RelayError("Could not open the rollout sync lock.") }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw RelayError("Could not acquire the rollout sync lock. Another sync may be running.")
+        }
+        return try await run()
+    }
+
+    // The table is published with the entire first successful report, including an empty backlog.
+    func savePreview(_ report: BacklogReport) throws {
+        try Self.execute("BEGIN IMMEDIATE", in: database)
+        do {
+            guard try !Self.hasTable("previewed_backlog", in: database) else {
+                throw RelayError("Another dry run saved the backlog. Run dry-run again to review it.")
+            }
+            try Self.execute("""
+                CREATE TABLE previewed_backlog (
+                    original_id TEXT PRIMARY KEY NOT NULL,
+                    copy_id TEXT,
+                    message_id TEXT,
+                    completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+                )
+                """, in: database)
+            try Self.prepare("""
+                INSERT INTO previewed_backlog (original_id, copy_id, message_id) VALUES (?, ?, ?)
+                """, in: database) { statement in
+                for entry in report.entries {
+                    try Self.bind(entry.originalID, to: statement, at: 1)
+                    try Self.bind(entry.forwardedCopyID, to: statement, at: 2)
+                    try Self.bind(entry.messageID, to: statement, at: 3)
+                    try Self.finish(statement)
+                    sqlite3_reset(statement)
+                }
+            }
+            try Self.execute("COMMIT", in: database)
+        } catch {
+            try? Self.execute("ROLLBACK", in: database)
             throw error
         }
     }
 
-    private func execute(_ sql: String, in database: OpaquePointer) throws {
+    func backlog() throws -> [Message]? {
+        guard try Self.hasTable("previewed_backlog", in: database) else { return nil }
+        return try Self.prepare("""
+            SELECT original_id, copy_id, message_id, completed FROM previewed_backlog ORDER BY original_id
+            """, in: database) { statement in
+            var messages: [Message] = []
+            while true {
+                let status = sqlite3_step(statement)
+                if status == SQLITE_DONE { return messages }
+                guard status == SQLITE_ROW, let originalID = Self.columnText(statement, 0) else {
+                    throw RelayError("Could not load the previewed backlog.")
+                }
+                messages.append(Message(
+                    originalID: originalID,
+                    copyID: Self.columnText(statement, 1),
+                    messageID: Self.columnText(statement, 2),
+                    completed: sqlite3_column_int(statement, 3) == 1
+                ))
+            }
+        }
+    }
+
+    func markCompleted(originalID: String) throws {
+        try Self.prepare("UPDATE previewed_backlog SET completed = 1 WHERE original_id = ?", in: database) { statement in
+            try Self.bind(originalID, to: statement, at: 1)
+            try Self.finish(statement)
+            guard sqlite3_changes(database) == 1 else {
+                throw RelayError("Could not save progress for the original message.")
+            }
+        }
+    }
+
+    private static func hasTable(_ table: String, in database: OpaquePointer) throws -> Bool {
+        try prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", in: database) { statement in
+            try bind(table, to: statement, at: 1)
+            let status = sqlite3_step(statement)
+            guard status == SQLITE_ROW || status == SQLITE_DONE else {
+                throw RelayError("Could not inspect the SQLite rollout state (status \(status)).")
+            }
+            return status == SQLITE_ROW
+        }
+    }
+
+    private static func bind(_ text: String?, to statement: OpaquePointer, at index: Int32) throws {
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        let status = text.map { sqlite3_bind_text(statement, index, $0, -1, transient) }
+            ?? sqlite3_bind_null(statement, index)
+        guard status == SQLITE_OK else {
+            throw RelayError("Could not bind a SQLite rollout value (status \(status)).")
+        }
+    }
+
+    private static func columnText(_ statement: OpaquePointer, _ index: Int32) -> String? {
+        sqlite3_column_text(statement, index).map { String(cString: $0) }
+    }
+
+    private static func finish(_ statement: OpaquePointer) throws {
+        let status = sqlite3_step(statement)
+        guard status == SQLITE_DONE else {
+            throw RelayError("Could not save the SQLite rollout state (status \(status)).")
+        }
+    }
+
+    private static func execute(_ sql: String, in database: OpaquePointer) throws {
         let status = sqlite3_exec(database, sql, nil, nil, nil)
         guard status == SQLITE_OK else {
             throw RelayError("Could not update the SQLite rollout state (status \(status)).")
         }
     }
 
-    private func prepare<Value>(
+    private static func prepare<Value>(
         _ sql: String, in database: OpaquePointer, read: (OpaquePointer) throws -> Value
     ) throws -> Value {
         var statement: OpaquePointer?

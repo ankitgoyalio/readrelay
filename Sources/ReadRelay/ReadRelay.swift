@@ -5,8 +5,8 @@ import Foundation
 struct ReadRelay: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "readrelay",
-        abstract: "Preview read-status changes for forwarded Gmail messages.",
-        subcommands: [Authorize.self, DryRun.self]
+        abstract: "Preview and sync read status for forwarded Gmail messages.",
+        subcommands: [Authorize.self, DryRun.self, Sync.self]
     )
 }
 
@@ -33,6 +33,7 @@ struct Configuration: Decodable {
     let secondaryEmail: String
     let primaryOAuthClientFile: String
     let secondaryOAuthClientFile: String
+    let enableWrites: Bool?
 
     static func load(path: String) throws -> Self {
         let config: Self
@@ -97,12 +98,58 @@ struct DryRun: AsyncParsableCommand {
         let primary = try await primaryOAuth.mailbox()
         let labelID = try await primary.readRelayLabelID()
         let secondary = try await secondaryOAuth.mailbox()
-        let cutoff = try RolloutState(path: state).cutoff(for: configuration, startedAt: startedAt)
-        let report = try await DryRunReport.preview(primary: primary, secondary: secondary, labelID: labelID, cutoff: cutoff)
+        let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
+        let backlog = try rollout.backlog()
+        let report = try await BacklogReport.scan(
+            primary: primary, secondary: secondary, labelID: labelID, cutoff: rollout.cutoff,
+            originalIDs: backlog.map { Set($0.map(\.originalID)) }
+        )
+        let output = try (backlog.map { report.rechecking($0) } ?? report).json()
+        if backlog == nil { try rollout.savePreview(report) }
+        print(output)
+    }
+}
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let output = try encoder.encode(report)
-        print(String(decoding: output, as: UTF8.self))
+struct Sync: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Apply read-status changes to the previewed backlog.")
+
+    @Option(help: "Path to the ReadRelay configuration JSON.")
+    var config: String
+
+    @Option(help: "Path to the SQLite state from a successful dry run.")
+    var state: String
+
+    @Flag(help: "Confirm Gmail writes for the previewed backlog.")
+    var apply = false
+
+    @Option(help: "Limit the sync to this previewed primary Gmail message ID. Requires --copy-id.")
+    var originalID: String?
+
+    @Option(help: "Require this previewed secondary Gmail message ID. Requires --original-id.")
+    var copyID: String?
+
+    func run() async throws {
+        guard apply else { throw RelayError("Pass --apply after reviewing the dry run.") }
+        let configuration = try Configuration.load(path: config)
+        guard configuration.enableWrites == true else {
+            throw RelayError("Set enableWrites to true in the configuration after reviewing the dry run.")
+        }
+        guard (originalID == nil) == (copyID == nil) else {
+            throw RelayError("Pass --original-id and --copy-id together to limit the sync to one reviewed pair.")
+        }
+        let rollout = try RolloutState(path: state, configuration: configuration)
+        try await RolloutState.withSyncLock(path: state) {
+            guard var backlog = try rollout.backlog() else {
+                throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+            }
+            if let originalID, let copyID {
+                guard let pair = backlog.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
+                    throw RelayError("The requested message pair is absent from the previewed backlog.")
+                }
+                backlog = [pair]
+            }
+            let report = try await applyBacklog(backlog, rollout: rollout, configuration: configuration)
+            print(try report.json())
+        }
     }
 }
