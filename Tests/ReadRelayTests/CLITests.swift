@@ -3,6 +3,54 @@ import SQLite3
 import XCTest
 
 final class CLITests: XCTestCase {
+    func testLaunchAgentSchedulesOnlyUnattendedPreviewsByDefault() throws {
+        let executable = "/Users/owner/Library/Application Support/ReadRelay & Dot/readrelay"
+        let config = "/Users/owner/Library/Application Support/ReadRelay & Dot/config.json"
+        let state = "/Users/owner/Library/Application Support/ReadRelay & Dot/probe.sqlite"
+        let logs = "/Users/owner/Library/Application Support/ReadRelay & Dot/logs"
+        let result = try runCLI([
+            "launch-agent", "--executable", executable, "--config", config,
+            "--state", state, "--log-directory", logs
+        ])
+        XCTAssertEqual(result.status, 0, result.error)
+        let decoded = try PropertyListSerialization.propertyList(from: result.output, format: nil)
+        let job = try XCTUnwrap(decoded as? [String: Any])
+        XCTAssertEqual(job["Label"] as? String, "io.ankitgoyal.readrelay")
+        XCTAssertEqual(job["LimitLoadToSessionType"] as? String, "Aqua")
+        XCTAssertEqual(job["RunAtLoad"] as? Bool, true)
+        XCTAssertEqual(job["StartInterval"] as? Int, 300)
+        XCTAssertEqual(job["ProgramArguments"] as? [String],
+                       [executable, "dry-run", "--unattended", "--config", config, "--state", state])
+        XCTAssertEqual(job["StandardOutPath"] as? String, logs + "/stdout.log")
+        XCTAssertEqual(job["StandardErrorPath"] as? String, logs + "/stderr.log")
+    }
+
+    func testLaunchAgentWriteModeStillRequiresWriteEnabledConfiguration() throws {
+        let directory = try temporaryDirectory()
+        let config = directory.appendingPathComponent("config.json")
+        let state = directory.appendingPathComponent("state.sqlite")
+        try Data("""
+            {"primaryEmail":"primary@example.com","secondaryEmail":"secondary@example.com",
+             "primaryOAuthClientFile":"unused.json","secondaryOAuthClientFile":"unused.json",
+             "enableWrites":false}
+            """.utf8).write(to: config)
+        let result = try runCLI([
+            "launch-agent", "--executable", "/opt/readrelay", "--config", config.path,
+            "--state", state.path, "--log-directory", directory.path, "--enable-scheduled-writes"
+        ])
+        XCTAssertEqual(result.status, 0, result.error)
+        let decoded = try PropertyListSerialization.propertyList(from: result.output, format: nil)
+        let job = try XCTUnwrap(decoded as? [String: Any])
+        let arguments = try XCTUnwrap(job["ProgramArguments"] as? [String])
+        XCTAssertEqual(arguments, [
+            "/opt/readrelay", "sync", "--apply", "--unattended", "--config", config.path, "--state", state.path
+        ])
+        let blocked = try runCLI(Array(arguments.dropFirst()))
+        XCTAssertNotEqual(blocked.status, 0)
+        XCTAssertTrue(blocked.error.contains("enableWrites"), blocked.error)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+    }
+
     func testSyncRequiresExplicitWriteConfigurationAndASuccessfulPreview() throws {
         let directory = try temporaryDirectory()
         let config = directory.appendingPathComponent("config.json")

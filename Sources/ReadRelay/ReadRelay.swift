@@ -6,7 +6,7 @@ struct ReadRelay: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "readrelay",
         abstract: "Preview and sync read status for forwarded Gmail messages.",
-        subcommands: [Authorize.self, DryRun.self, Sync.self]
+        subcommands: [Authorize.self, DryRun.self, Sync.self, LaunchAgent.self]
     )
 }
 
@@ -90,11 +90,15 @@ struct DryRun: AsyncParsableCommand {
     @Option(help: "Path to the SQLite rollout state.")
     var state: String
 
+    @Flag(help: "Fail if Keychain access requires user interaction.")
+    var unattended = false
+
     func run() async throws {
         let startedAt = Date()
         let configuration = try Configuration.load(path: config)
         let primaryOAuth = try OAuth(role: .primary, configuration: configuration, configPath: config)
         let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: config)
+        if unattended { try OAuth.preventKeychainPrompts() }
         let primary = try await primaryOAuth.mailbox()
         let labelID = try await primary.readRelayLabelID()
         let secondary = try await secondaryOAuth.mailbox()
@@ -121,6 +125,9 @@ struct Sync: AsyncParsableCommand {
 
     @Flag(help: "Confirm Gmail writes for this sync.")
     var apply = false
+
+    @Flag(help: "Fail if Keychain access requires user interaction.")
+    var unattended = false
 
     @Option(help: "Limit the sync to this previewed primary Gmail message ID. Requires --copy-id.")
     var originalID: String?

@@ -65,6 +65,10 @@ The sync keeps unresolved matches and unread originals pending in SQLite. Once t
 
 Pass `--original-id` and `--copy-id` together to apply only one saved pair, using the Gmail message IDs from the reviewed report. A run limited to one pair leaves the transition to discovery for the first successful full sync.
 
+## Run on the Mac mini
+
+See the [launchd runbook](docs/launchd.md) for the five-minute preview job, unattended Keychain checks, and the owner approval required for scheduled writes.
+
 ## Seeded Gmail check
 
 Run `swift test` for the offline CLI checks. The opt-in Gmail check uses known, labeled original messages in the five-day window and the existing copies in the secondary mailbox. Use a private expectations file containing an array of objects with `originalID`, `forwardedCopyID` (when a unique copy exists), and `outcome`. Include at least one read original with an unread copy and one unread original with an unread copy. Additional seeds can cover the other report outcomes.

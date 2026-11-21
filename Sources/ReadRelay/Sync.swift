@@ -10,6 +10,7 @@ extension Sync {
             return BacklogReport(cutoffEpochMilliseconds: cutoff, entries: entries)
         }
 
+        if unattended { try OAuth.preventKeychainPrompts() }
         let primary = try await OAuth(role: .primary, configuration: configuration, configPath: config).mailbox()
         let labelID = try await primary.readRelayLabelID()
         let secondary = try await OAuth(role: .secondary, configuration: configuration, configPath: config).mailbox()

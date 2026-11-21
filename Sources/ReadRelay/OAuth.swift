@@ -89,6 +89,14 @@ struct OAuth {
         return try await verifiedMailbox(refreshToken: refreshToken)
     }
 
+    static func preventKeychainPrompts() throws {
+        // The existing refresh tokens use the macOS file-based Keychain.
+        let status = SecKeychainSetUserInteractionAllowed(false)
+        guard status == errSecSuccess else {
+            throw RelayError("Could not disable Keychain interaction for this run (status \(status)).")
+        }
+    }
+
     private var keychainAccount: String {
         "\(role.rawValue):\(email.lowercased()):\(client.clientID)"
     }
@@ -156,6 +164,9 @@ private struct RefreshTokenKeychain {
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound {
             throw RelayError("A refresh token is missing from Keychain. Run readrelay authorize for that mailbox.")
+        }
+        if status == errSecInteractionNotAllowed {
+            throw RelayError("Keychain access requires interaction. Unlock the login Keychain and allow this ReadRelay executable to access the refresh token.")
         }
         guard status == errSecSuccess, let data = result as? Data,
               let value = String(data: data, encoding: .utf8), !value.isEmpty else {
