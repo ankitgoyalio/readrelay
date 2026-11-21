@@ -59,9 +59,11 @@ After reviewing a successful dry run, add `"enableWrites": true` to the configur
 .build/debug/readrelay sync --apply --config /path/to/readrelay.json --state /path/to/rollout.sqlite
 ```
 
-Sync rechecks that each saved pair still matches unambiguously and reads both messages' current labels before removing `UNREAD` from an individual secondary copy. Its report adds `markedRead` for a successful Gmail write and `completed` for pairs already recorded as done in SQLite. If a write or progress save fails, rerun the same command. If Gmail already cleared `UNREAD`, the retry records `copyAlreadyRead` without another write. Unresolved matches and unread originals remain pending. New originals and copies absent from the saved matches are outside this backlog run.
+The first successful full sync applies only the reviewed batch and its saved matches. On later runs, the same command discovers labeled originals whose Gmail internal dates are at or after the saved cutoff. This includes messages received after the preview and messages within the cutoff that receive the label later. The cutoff stays fixed, so reading an original weeks later still counts. Keep using the same SQLite file across runs and restarts. A dry run against that file continues to show the reviewed backlog.
 
-Pass `--original-id` and `--copy-id` together to apply only one saved pair, using the Gmail message IDs from the reviewed report.
+The sync keeps unresolved matches and unread originals pending in SQLite. Once the full reviewed run has succeeded, a pending original can pick up its first unambiguous match, including a late copy. A saved match stays tied to the same copy. Sync checks both messages' current metadata, fetching the original last before any Gmail write. If Gmail already cleared `UNREAD`, the retry records `copyAlreadyRead` without another write. The report uses `markedRead` for a successful write and `completed` for pairs already recorded as done. Subsequent runs leave completed pairs alone.
+
+Pass `--original-id` and `--copy-id` together to apply only one saved pair, using the Gmail message IDs from the reviewed report. A run limited to one pair leaves the transition to discovery for the first successful full sync.
 
 ## Seeded Gmail check
 
@@ -78,3 +80,15 @@ The write check deliberately marks one seeded secondary copy read. After approva
 ```fish
 env READRELAY_SEEDED_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_WRITE_EXPECTATIONS=/path/to/write-expectations.json swift test --filter testSyncMarksOnlyTheSelectedSeededCopyAndCanBeRerun
 ```
+
+### Incremental sync with staged Gmail seeds
+
+The incremental check runs full write-enabled syncs. Use dedicated seeded mailboxes and review all eligible messages before opting in, since any eligible read original can cause its copy to be marked read. Start with a successful dry-run SQLite file that has never run `sync`. Its preview must include a known unread original with an unread copy. After saving the preview, make a different real unread pair eligible by labeling its original `ReadRelay`. The original must be within the saved cutoff. Leave both copies unread. The test copies the closed SQLite file into a temporary directory and uses the same temporary state across separate CLI processes.
+
+Create a private expectations file with `reviewedUnreadOriginalID`, `newUnreadOriginalID`, and `newUnreadCopyID`. If the original preview also captured a known unread original before its copy arrived, add `lateUnreadCopy` with `originalID` and `copyID` once that copy is present and unread. The test checks that the first run stays within the previewed batch, later runs find the newly labeled original, and the unread pairs stay pending across invocations. With a staged late copy it also checks that the first run skips the unreviewed match and the next run finds it.
+
+```fish
+env READRELAY_SEEDED_INCREMENTAL_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_REVIEWED_STATE=/path/to/reviewed.sqlite READRELAY_SEEDED_INCREMENTAL_EXPECTATIONS=/path/to/incremental-expectations.json swift test --filter testSyncDiscoversNewSeededOriginalsAfterApplyingTheReviewedBacklog
+```
+
+A static set of seeded Gmail messages does not establish when a copy arrived, when an original became read, or whether it was marked unread again between syncs. The staged check still needs a real delayed delivery to cover late arrival, and a changing primary read state over time to demonstrate a weeks-later read or an unread reminder before a retry. With the originals continuously labeled, the test also cannot distinguish saved pending work from rediscovery. That requires staging an original that temporarily loses its label and checking for `originalUnavailable` after a restart. The selected-pair write check covers a completed retry and the state left by an interrupted progress save. A crash during a Gmail write and a later primary read-state change after completion require separate staged checks. Missing headers and ambiguous matches require real seeds exhibiting those conditions.

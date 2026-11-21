@@ -99,7 +99,7 @@ struct DryRun: AsyncParsableCommand {
         let labelID = try await primary.readRelayLabelID()
         let secondary = try await secondaryOAuth.mailbox()
         let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
-        let backlog = try rollout.backlog()
+        let backlog = try rollout.messages(in: .reviewed)
         let report = try await BacklogReport.scan(
             primary: primary, secondary: secondary, labelID: labelID, cutoff: rollout.cutoff,
             originalIDs: backlog.map { Set($0.map(\.originalID)) }
@@ -111,7 +111,7 @@ struct DryRun: AsyncParsableCommand {
 }
 
 struct Sync: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Apply read-status changes to the previewed backlog.")
+    static let configuration = CommandConfiguration(abstract: "Apply read-status changes to reviewed and newly labeled mail.")
 
     @Option(help: "Path to the ReadRelay configuration JSON.")
     var config: String
@@ -119,7 +119,7 @@ struct Sync: AsyncParsableCommand {
     @Option(help: "Path to the SQLite state from a successful dry run.")
     var state: String
 
-    @Flag(help: "Confirm Gmail writes for the previewed backlog.")
+    @Flag(help: "Confirm Gmail writes for this sync.")
     var apply = false
 
     @Option(help: "Limit the sync to this previewed primary Gmail message ID. Requires --copy-id.")
@@ -139,17 +139,28 @@ struct Sync: AsyncParsableCommand {
         }
         let rollout = try RolloutState(path: state, configuration: configuration)
         try await RolloutState.withSyncLock(path: state) {
-            guard var backlog = try rollout.backlog() else {
+            guard let backlog = try rollout.messages(in: .reviewed) else {
                 throw RelayError("Run a successful dry run with this SQLite state before syncing.")
             }
+            let ongoing = try rollout.messages(in: .ongoing)
+            let batch: RolloutState.Batch = ongoing == nil ? .reviewed : .ongoing
+            var work = ongoing ?? backlog
             if let originalID, let copyID {
-                guard let pair = backlog.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
+                guard backlog.contains(where: { $0.originalID == originalID && $0.copyID == copyID }),
+                      let pair = work.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
                     throw RelayError("The requested message pair is absent from the previewed backlog.")
                 }
-                backlog = [pair]
+                work = [pair]
             }
-            let report = try await applyBacklog(backlog, rollout: rollout, configuration: configuration)
-            print(try report.json())
+            let report = try await applyWork(
+                work, in: batch, discover: batch == .ongoing && originalID == nil,
+                rollout: rollout, configuration: configuration
+            )
+            let output = try report.json()
+            if batch == .reviewed, originalID == nil {
+                try rollout.startIncrementalSync()
+            }
+            print(output)
         }
     }
 }

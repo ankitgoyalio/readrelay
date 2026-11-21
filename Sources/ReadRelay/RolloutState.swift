@@ -10,6 +10,11 @@ final class RolloutState {
         let completed: Bool
     }
 
+    enum Batch: String {
+        case reviewed = "previewed_backlog"
+        case ongoing = "sync_work"
+    }
+
     private let database: OpaquePointer
     let cutoff: Int64
 
@@ -93,30 +98,40 @@ final class RolloutState {
 
     // The table is published with the entire first successful report, including an empty backlog.
     func savePreview(_ report: BacklogReport) throws {
-        try Self.execute("BEGIN IMMEDIATE", in: database)
-        do {
-            guard try !Self.hasTable("previewed_backlog", in: database) else {
+        try transaction {
+            guard try !Self.hasTable(Batch.reviewed.rawValue, in: database) else {
                 throw RelayError("Another dry run saved the backlog. Run dry-run again to review it.")
             }
+            try createBatch(.reviewed)
+            try insert(report.entries.map { entry in
+                Message(originalID: entry.originalID, copyID: entry.forwardedCopyID,
+                        messageID: entry.messageID, completed: false)
+            }, into: .reviewed)
+        }
+    }
+
+    // Publishing the new batch also records that the full reviewed sync succeeded.
+    func startIncrementalSync() throws {
+        try transaction {
+            try createBatch(.ongoing)
             try Self.execute("""
-                CREATE TABLE previewed_backlog (
-                    original_id TEXT PRIMARY KEY NOT NULL,
-                    copy_id TEXT,
-                    message_id TEXT,
-                    completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
-                )
+                INSERT INTO sync_work (original_id, copy_id, message_id, completed)
+                SELECT original_id, copy_id, message_id, completed FROM previewed_backlog
                 """, in: database)
-            try Self.prepare("""
-                INSERT INTO previewed_backlog (original_id, copy_id, message_id) VALUES (?, ?, ?)
-                """, in: database) { statement in
-                for entry in report.entries {
-                    try Self.bind(entry.originalID, to: statement, at: 1)
-                    try Self.bind(entry.forwardedCopyID, to: statement, at: 2)
-                    try Self.bind(entry.messageID, to: statement, at: 3)
-                    try Self.finish(statement)
-                    sqlite3_reset(statement)
-                }
-            }
+        }
+    }
+
+    func saveDiscovered(_ messages: [Message]) throws {
+        guard !messages.isEmpty else { return }
+        try transaction {
+            try insert(messages, into: .ongoing)
+        }
+    }
+
+    private func transaction(_ update: () throws -> Void) throws {
+        try Self.execute("BEGIN IMMEDIATE", in: database)
+        do {
+            try update()
             try Self.execute("COMMIT", in: database)
         } catch {
             try? Self.execute("ROLLBACK", in: database)
@@ -124,17 +139,42 @@ final class RolloutState {
         }
     }
 
-    func backlog() throws -> [Message]? {
-        guard try Self.hasTable("previewed_backlog", in: database) else { return nil }
+    private func createBatch(_ batch: Batch) throws {
+        try Self.execute("""
+            CREATE TABLE \(batch.rawValue) (
+                original_id TEXT PRIMARY KEY NOT NULL,
+                copy_id TEXT,
+                message_id TEXT,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+            )
+            """, in: database)
+    }
+
+    private func insert(_ messages: [Message], into batch: Batch) throws {
+        try Self.prepare("""
+            INSERT INTO \(batch.rawValue) (original_id, copy_id, message_id) VALUES (?, ?, ?)
+            """, in: database) { statement in
+            for message in messages {
+                try Self.bind(message.originalID, to: statement, at: 1)
+                try Self.bind(message.copyID, to: statement, at: 2)
+                try Self.bind(message.messageID, to: statement, at: 3)
+                try Self.finish(statement)
+                sqlite3_reset(statement)
+            }
+        }
+    }
+
+    func messages(in batch: Batch) throws -> [Message]? {
+        guard try Self.hasTable(batch.rawValue, in: database) else { return nil }
         return try Self.prepare("""
-            SELECT original_id, copy_id, message_id, completed FROM previewed_backlog ORDER BY original_id
+            SELECT original_id, copy_id, message_id, completed FROM \(batch.rawValue) ORDER BY original_id
             """, in: database) { statement in
             var messages: [Message] = []
             while true {
                 let status = sqlite3_step(statement)
                 if status == SQLITE_DONE { return messages }
                 guard status == SQLITE_ROW, let originalID = Self.columnText(statement, 0) else {
-                    throw RelayError("Could not load the previewed backlog.")
+                    throw RelayError("Could not load the saved sync work.")
                 }
                 messages.append(Message(
                     originalID: originalID,
@@ -146,8 +186,22 @@ final class RolloutState {
         }
     }
 
-    func markCompleted(originalID: String) throws {
-        try Self.prepare("UPDATE previewed_backlog SET completed = 1 WHERE original_id = ?", in: database) { statement in
+    func saveMatch(originalID: String, copyID: String, messageID: String) throws {
+        try Self.prepare("""
+            UPDATE sync_work SET copy_id = ?, message_id = ? WHERE original_id = ? AND copy_id IS NULL
+            """, in: database) { statement in
+            try Self.bind(copyID, to: statement, at: 1)
+            try Self.bind(messageID, to: statement, at: 2)
+            try Self.bind(originalID, to: statement, at: 3)
+            try Self.finish(statement)
+            guard sqlite3_changes(database) == 1 else {
+                throw RelayError("Could not save the match for the original message.")
+            }
+        }
+    }
+
+    func markCompleted(originalID: String, in batch: Batch) throws {
+        try Self.prepare("UPDATE \(batch.rawValue) SET completed = 1 WHERE original_id = ?", in: database) { statement in
             try Self.bind(originalID, to: statement, at: 1)
             try Self.finish(statement)
             guard sqlite3_changes(database) == 1 else {

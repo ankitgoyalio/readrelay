@@ -75,7 +75,7 @@ struct BacklogReport: Encodable {
 
     static func scan(
         primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64,
-        originalIDs: Set<String>? = nil
+        originalIDs: Set<String>? = nil, excludingOriginalIDs: Set<String> = []
     ) async throws -> Self {
         if originalIDs?.isEmpty == true { return Self(cutoffEpochMilliseconds: cutoff, entries: []) }
         let originals = try await primary.messages(labelID: labelID)
@@ -83,6 +83,7 @@ struct BacklogReport: Encodable {
             .map(IndexedMessage.init)
         let originalIndex = index(originals)
         let eligibleOriginals = try originals.filter { original in
+            if excludingOriginalIDs.contains(original.message.id) { return false }
             if let originalIDs, !originalIDs.contains(original.message.id) { return false }
             guard let rawDate = original.message.internalDate, let date = Int64(rawDate) else {
                 throw RelayError("Gmail returned an original without a valid internal date.")

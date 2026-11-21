@@ -206,6 +206,75 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(try successfulReport(["dry-run"] + options).entries, after.entries)
     }
 
+    func testSyncDiscoversNewSeededOriginalsAfterApplyingTheReviewedBacklog() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["READRELAY_SEEDED_INCREMENTAL_APPLY"] == "1" else {
+            throw XCTSkip("Set READRELAY_SEEDED_INCREMENTAL_APPLY=1 to run a full sync against staged Gmail seeds.")
+        }
+        let config = try XCTUnwrap(environment["READRELAY_SEEDED_TEST_CONFIG"])
+        let reviewedState = try XCTUnwrap(environment["READRELAY_SEEDED_REVIEWED_STATE"])
+        let path = try XCTUnwrap(environment["READRELAY_SEEDED_INCREMENTAL_EXPECTATIONS"])
+        let seeds = try JSONDecoder().decode(
+            IncrementalSeeds.self, from: Data(contentsOf: URL(fileURLWithPath: path))
+        )
+        let state = try temporaryDirectory().appendingPathComponent("state.sqlite")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: reviewedState), to: state)
+        let options = ["--config", config, "--state", state.path]
+        let preview = try successfulReport(["dry-run"] + options)
+        guard let pending = preview.entries.first(where: { $0.originalID == seeds.reviewedUnreadOriginalID }),
+              pending.outcome == "originalUnread", pending.forwardedCopyLabelIDs?.contains("UNREAD") == true,
+              !preview.entries.contains(where: { $0.originalID == seeds.newUnreadOriginalID }) else {
+            XCTFail("The saved preview must contain the reviewed unread pair and exclude the new original.")
+            return
+        }
+        if let late = seeds.lateUnreadCopy {
+            let entry = try XCTUnwrap(preview.entries.first { $0.originalID == late.originalID })
+            guard entry.outcome == "matchChanged", entry.forwardedCopyID == nil else {
+                XCTFail("The late pair must be absent from the saved matches and present in Gmail now.")
+                return
+            }
+        }
+
+        let arguments = ["sync", "--apply"] + options
+        let first = try successfulReport(arguments)
+        XCTAssertEqual(first.cutoffEpochMilliseconds, preview.cutoffEpochMilliseconds)
+        XCTAssertEqual(first.entries.map(\.originalID), preview.entries.map(\.originalID))
+        XCTAssertEqual(first.entries.first { $0.originalID == pending.originalID }, pending)
+
+        let second = try successfulReport(arguments)
+        XCTAssertEqual(second.cutoffEpochMilliseconds, preview.cutoffEpochMilliseconds)
+        XCTAssertEqual(second.entries.first { $0.originalID == pending.originalID }, pending)
+        let discovered = try XCTUnwrap(second.entries.first { $0.originalID == seeds.newUnreadOriginalID })
+        XCTAssertEqual(discovered.forwardedCopyID, seeds.newUnreadCopyID)
+        XCTAssertEqual(discovered.outcome, "originalUnread")
+        XCTAssertTrue(discovered.originalLabelIDs.contains("UNREAD"))
+        XCTAssertTrue(discovered.forwardedCopyLabelIDs?.contains("UNREAD") == true)
+        if let late = seeds.lateUnreadCopy {
+            XCTAssertEqual(first.entries.first { $0.originalID == late.originalID }?.outcome, "matchChanged")
+            let matched = try XCTUnwrap(second.entries.first { $0.originalID == late.originalID })
+            XCTAssertEqual(matched.forwardedCopyID, late.copyID)
+            XCTAssertEqual(matched.outcome, "originalUnread")
+            XCTAssertTrue(matched.forwardedCopyLabelIDs?.contains("UNREAD") == true)
+        }
+
+        let restarted = try successfulReport(arguments)
+        XCTAssertEqual(restarted.cutoffEpochMilliseconds, preview.cutoffEpochMilliseconds)
+        XCTAssertEqual(restarted.entries.first { $0.originalID == pending.originalID }, pending)
+        XCTAssertEqual(restarted.entries.first { $0.originalID == discovered.originalID }, discovered)
+    }
+
+    private struct IncrementalSeeds: Decodable {
+        struct Pair: Decodable {
+            let originalID: String
+            let copyID: String
+        }
+
+        let reviewedUnreadOriginalID: String
+        let newUnreadOriginalID: String
+        let newUnreadCopyID: String
+        let lateUnreadCopy: Pair?
+    }
+
     private func successfulReport(_ arguments: [String]) throws -> Preview {
         let result = try runCLI(arguments)
         XCTAssertEqual(result.status, 0, result.error)
