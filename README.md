@@ -61,7 +61,7 @@ After reviewing a successful dry run, add `"enableWrites": true` to the configur
 
 The first successful full sync applies only the reviewed batch and its saved matches. On later runs, the same command discovers labeled originals whose Gmail internal dates are at or after the saved cutoff. This includes messages received after the preview and messages within the cutoff that receive the label later. The cutoff stays fixed, so reading an original weeks later still counts. Keep using the same SQLite file across runs and restarts. A dry run against that file continues to show the reviewed backlog.
 
-The sync keeps unresolved matches and unread originals pending in SQLite. Once the full reviewed run has succeeded, a pending original can pick up its first unambiguous match, including a late copy. A saved match stays tied to the same copy. Sync checks both messages' current metadata, fetching the original last before any Gmail write. If Gmail already cleared `UNREAD`, the retry records `copyAlreadyRead` without another write. The report uses `markedRead` for a successful write and `completed` for pairs already recorded as done. Subsequent runs leave completed pairs alone.
+The sync keeps unresolved matches and unread originals pending in SQLite. Once the full reviewed run has succeeded, a pending original can pick up its first unambiguous match, including a late copy. A saved match stays tied to the same copy. Before each Gmail write, sync refreshes the selected pair and checks Gmail History in both mailboxes for changes that could invalidate the match or read status. It rescans when mailbox membership may have changed and stops if it cannot verify the pair. Gmail provides no atomic check and write across mailboxes, so a concurrent change can still race the final write. If Gmail already cleared `UNREAD`, the retry records `copyAlreadyRead` without another write. The report uses `markedRead` for a successful write and `completed` for pairs already recorded as done. Subsequent runs leave completed pairs alone.
 
 Pass `--original-id` and `--copy-id` together to apply only one saved pair, using the Gmail message IDs from the reviewed report. A run limited to one pair leaves the transition to discovery for the first successful full sync.
 
@@ -84,6 +84,8 @@ The write check deliberately marks one seeded secondary copy read. After approva
 ```fish
 env READRELAY_SEEDED_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_WRITE_EXPECTATIONS=/path/to/write-expectations.json swift test --filter testSyncMarksOnlyTheSelectedSeededCopyAndCanBeRerun
 ```
+
+To check a pair from an existing reviewed backlog, also set `READRELAY_SEEDED_REVIEWED_STATE` to the closed SQLite file from a successful dry run that has never run sync. The test copies that file into both temporary paths, preserving the reviewed backlog and cutoff. With the variable unset, both temporary states get fresh previews.
 
 ### Incremental sync with staged Gmail seeds
 

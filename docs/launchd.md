@@ -1,6 +1,6 @@
 # Run ReadRelay on the Mac mini
 
-Scheduled Gmail writes are disabled. The owner has yet to approve the dry-run report, and Dot’s normal digest is paused. Start with a preview job and keep its SQLite file separate from the state used for rollout.
+Start with a preview job and keep its SQLite file separate from the state used for rollout. Enable scheduled Gmail writes only after the owner approves recurring writes and the checks below pass.
 
 The user agent runs at load and every 300 seconds in the owner’s graphical login session. An interval that falls during sleep or an active run can be missed. The next available run uses the same SQLite file. After reboot the job starts when the owner logs in. See `man launchd.plist` for the timing rules.
 

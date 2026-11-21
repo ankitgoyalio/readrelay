@@ -122,7 +122,7 @@ struct OAuth {
         request.httpBody = Data(body.utf8)
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-        let response: TokenResponse = try await GoogleHTTP.read(request, operation: "\(role.rawValue) OAuth token exchange")
+        let response: TokenResponse = try await GoogleHTTP.send(request, operation: "\(role.rawValue) OAuth token exchange")
         guard let scope = response.scope, Set(scope.split(separator: " ").map(String.init)) == [role.scope] else {
             throw RelayError("The \(role.rawValue) Gmail grant must contain exactly \(role.scope).")
         }

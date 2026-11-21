@@ -1,5 +1,20 @@
 import Foundation
 
+struct RelayMailboxes {
+    let primary: GmailMailbox
+    let secondary: GmailMailbox
+    let readRelayLabelID: String
+
+    init(configuration: Configuration, configPath: String, unattended: Bool) async throws {
+        let primaryOAuth = try OAuth(role: .primary, configuration: configuration, configPath: configPath)
+        let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: configPath)
+        if unattended { try OAuth.preventKeychainPrompts() }
+        primary = try await primaryOAuth.mailbox()
+        readRelayLabelID = try await primary.readRelayLabelID()
+        secondary = try await secondaryOAuth.mailbox()
+    }
+}
+
 struct GmailMailbox: Sendable {
     let role: MailboxRole
     let accessToken: String
@@ -28,6 +43,88 @@ struct GmailMailbox: Sendable {
         return label.id
     }
 
+    func historyCursor() async throws -> UInt64 {
+        struct Profile: Decodable { let historyId: String }
+        let profile: Profile = try await get("profile", query: [URLQueryItem(name: "fields", value: "historyId")])
+        guard let cursor = UInt64(profile.historyId), cursor > 0 else {
+            throw RelayError("Gmail returned an invalid \(role.rawValue) history cursor.")
+        }
+        return cursor
+    }
+
+    struct HistoryChanges: Sendable {
+        var cursor: UInt64
+        var matchingSetChanged = false
+        var selectedMessageChanged = false
+    }
+
+    /// Check the whole change stream. A label filter could hide an original that
+    /// lost ReadRelay, or a new message that gained it after delivery.
+    func changes(after cursor: UInt64, selectedID: String, matchLabelID: String? = nil) async throws -> HistoryChanges {
+        struct Page: Decodable {
+            struct Record: Decodable {
+                struct Reference: Decodable { let id: String }
+                struct MessageChange: Decodable { let message: Reference }
+                struct LabelChange: Decodable {
+                    let message: Reference
+                    let labelIds: [String]
+                }
+                let id: String
+                let messages: [Reference]?
+                let messagesAdded: [MessageChange]?
+                let messagesDeleted: [MessageChange]?
+                let labelsAdded: [LabelChange]?
+                let labelsRemoved: [LabelChange]?
+            }
+            let historyId: String
+            let history: [Record]?
+            let nextPageToken: String?
+        }
+
+        var changes = HistoryChanges(cursor: cursor)
+        var lastRecordID = cursor
+        var seenPageTokens: Set<String> = []
+        var pageToken: String?
+        repeat {
+            var query = [
+                URLQueryItem(name: "startHistoryId", value: String(cursor)),
+                URLQueryItem(name: "maxResults", value: "500"),
+                URLQueryItem(name: "fields", value: "historyId,nextPageToken,history(id,messages(id),"
+                             + "messagesAdded(message(id)),messagesDeleted(message(id)),"
+                             + "labelsAdded(message(id),labelIds),labelsRemoved(message(id),labelIds))")
+            ]
+            if let pageToken { query.append(URLQueryItem(name: "pageToken", value: pageToken)) }
+            let page: Page = try await get("history", query: query)
+            for record in page.history ?? [] {
+                guard let recordID = UInt64(record.id), recordID > lastRecordID else {
+                    throw RelayError("Gmail returned out-of-order \(role.rawValue) history.")
+                }
+                lastRecordID = recordID
+                let membership = (record.messagesAdded ?? []) + (record.messagesDeleted ?? [])
+                let labels = (record.labelsAdded ?? []) + (record.labelsRemoved ?? [])
+                let typedIDs = Set(membership.map(\.message.id) + labels.map(\.message.id))
+                let otherChange = typedIDs.isEmpty || (record.messages ?? []).contains { !typedIDs.contains($0.id) }
+                if otherChange || !membership.isEmpty || labels.contains(where: { change in
+                    matchLabelID.map { change.labelIds.contains($0) } ?? false
+                }) {
+                    changes.matchingSetChanged = true
+                }
+                if typedIDs.contains(selectedID) {
+                    changes.selectedMessageChanged = true
+                }
+            }
+            guard let pageCursor = UInt64(page.historyId), pageCursor >= lastRecordID else {
+                throw RelayError("Gmail returned an invalid \(role.rawValue) history cursor.")
+            }
+            changes.cursor = pageCursor
+            pageToken = page.nextPageToken
+            if let pageToken, pageToken.isEmpty || !seenPageTokens.insert(pageToken).inserted {
+                throw RelayError("Gmail returned an invalid \(role.rawValue) history page token.")
+            }
+        } while pageToken != nil
+        return changes
+    }
+
     /// With gmail.metadata, labels are the only available primary selection.
     /// Scan the whole secondary mailbox so copies outside the initial window
     /// and duplicates hidden by normal Gmail views still participate in matching.
@@ -54,8 +151,8 @@ struct GmailMailbox: Sendable {
             let ids = (page.messages ?? []).map(\.id).filter { seenIDs.insert($0).inserted }
             messages.append(contentsOf: try await metadata(for: ids))
             pageToken = page.nextPageToken
-            if let pageToken, !seenPageTokens.insert(pageToken).inserted {
-                throw RelayError("Gmail returned a repeated \(role.rawValue) message page.")
+            if let pageToken, pageToken.isEmpty || !seenPageTokens.insert(pageToken).inserted {
+                throw RelayError("Gmail returned an invalid \(role.rawValue) message page token.")
             }
         } while pageToken != nil
         return messages
@@ -101,7 +198,7 @@ struct GmailMailbox: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(#"{"removeLabelIds":["UNREAD"]}"#.utf8)
-        let updated: GmailMessage = try await GoogleHTTP.read(request, operation: "secondary Gmail message modification")
+        let updated: GmailMessage = try await GoogleHTTP.send(request, operation: "secondary Gmail message modification")
         guard updated.id == id, !updated.isUnread else {
             throw RelayError("Gmail did not confirm removal of UNREAD from the forwarded copy.")
         }
@@ -109,7 +206,7 @@ struct GmailMailbox: Sendable {
     }
 
     private func get<Value: Decodable>(_ path: String, query: [URLQueryItem]) async throws -> Value {
-        try await GoogleHTTP.read(requestFor(path, query: query),
+        try await GoogleHTTP.send(requestFor(path, query: query),
                                   operation: "\(role.rawValue) Gmail \(path.split(separator: "/")[0]) request")
     }
 
@@ -145,6 +242,6 @@ struct GmailMessage: Decodable, Sendable {
     var messageIDHeaders: [String] {
         (payload?.headers ?? [])
             .filter { $0.name.caseInsensitiveCompare("Message-ID") == .orderedSame }
-            .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map(\.value)
     }
 }

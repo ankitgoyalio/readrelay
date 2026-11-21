@@ -10,22 +10,82 @@ extension Sync {
             return BacklogReport(cutoffEpochMilliseconds: cutoff, entries: entries)
         }
 
-        if unattended { try OAuth.preventKeychainPrompts() }
-        let primary = try await OAuth(role: .primary, configuration: configuration, configPath: config).mailbox()
-        let labelID = try await primary.readRelayLabelID()
-        let secondary = try await OAuth(role: .secondary, configuration: configuration, configPath: config).mailbox()
-        let report = try await BacklogReport.scan(
-            primary: primary, secondary: secondary, labelID: labelID, cutoff: cutoff,
-            originalIDs: discover ? nil : Set(pending.map(\.originalID)),
-            excludingOriginalIDs: Set(savedWork.filter(\.completed).map(\.originalID))
-        )
+        let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
+        let primary = mailboxes.primary
+        let secondary = mailboxes.secondary
+        let labelID = mailboxes.readRelayLabelID
+        let originalIDs = discover ? nil : Set(pending.map(\.originalID))
+        let completedIDs = Set(savedWork.filter(\.completed).map(\.originalID))
+        func scan() async throws -> BacklogReport {
+            try await BacklogReport.scan(
+                primary: primary, secondary: secondary, labelID: labelID, cutoff: cutoff,
+                originalIDs: originalIDs, excludingOriginalIDs: completedIDs
+            )
+        }
+
+        // Start the change streams before listing either mailbox so changes
+        // during the scan, including between list pages, can invalidate it.
+        async let initialPrimaryCursor = primary.historyCursor()
+        async let initialSecondaryCursor = secondary.historyCursor()
+        var (primaryCursor, secondaryCursor) = try await (initialPrimaryCursor, initialSecondaryCursor)
+        let report = try await scan()
         let knownOriginals = Set(savedWork.map(\.originalID))
         let discovered = report.entries.filter { !knownOriginals.contains($0.originalID) }.map {
             RolloutState.Message(originalID: $0.originalID, copyID: nil, messageID: $0.messageID, completed: false)
         }
         try rollout.saveDiscovered(discovered)
         var claimedCopies = Set(savedWork.compactMap(\.copyID))
-        let byID = Dictionary(uniqueKeysWithValues: report.entries.map { ($0.originalID, $0) })
+        var byID = Dictionary(uniqueKeysWithValues: report.entries.map { ($0.originalID, $0) })
+
+        func recheck(
+            _ saved: RolloutState.Message, copyID: String, messageID: String, canSaveMatch: Bool
+        ) async throws -> CheckedPair {
+            for _ in 0..<3 {
+                async let fetchedCopy = secondary.message(id: copyID)
+                async let fetchedOriginal = primary.message(id: saved.originalID)
+                let (copy, original) = try await (fetchedCopy, fetchedOriginal)
+                guard original.labelIds?.contains(labelID) == true,
+                      let originalDate = original.internalDate.flatMap(Int64.init), originalDate >= cutoff else {
+                    return .skipped(.init(saved: saved, outcome: .originalUnavailable))
+                }
+                guard IndexedMessage(original).messageID == messageID, IndexedMessage(copy).messageID == messageID else {
+                    return .skipped(.init(saved: saved, outcome: .matchChanged))
+                }
+                if original.isUnread, copy.isUnread, !canSaveMatch {
+                    return .matched(original, copy)
+                }
+
+                // A clean history read in both mailboxes validates the scan and
+                // the selected messages. Gmail offers no cross-mailbox transaction,
+                // so a concurrent change after these reads can still race the write.
+                let originalCheckpoint = primaryCursor
+                let copyCheckpoint = secondaryCursor
+                async let primaryChanges = primary.changes(
+                    after: originalCheckpoint, selectedID: saved.originalID, matchLabelID: labelID
+                )
+                async let secondaryChanges = secondary.changes(after: copyCheckpoint, selectedID: copyID)
+                let (originalChanges, copyChanges) = try await (primaryChanges, secondaryChanges)
+                primaryCursor = originalChanges.cursor
+                secondaryCursor = copyChanges.cursor
+                if originalChanges.matchingSetChanged || copyChanges.matchingSetChanged {
+                    let refreshed = try await scan()
+                    byID = Dictionary(uniqueKeysWithValues: refreshed.entries.map { ($0.originalID, $0) })
+                    guard let current = byID[saved.originalID] else {
+                        return .skipped(.init(saved: saved, outcome: .originalUnavailable))
+                    }
+                    guard current.forwardedCopyID != nil else { return .skipped(current) }
+                    guard current.forwardedCopyID == copyID, current.messageID == messageID else {
+                        return .skipped(.init(saved: saved, outcome: .matchChanged))
+                    }
+                    continue
+                }
+                if !originalChanges.selectedMessageChanged, !copyChanges.selectedMessageChanged {
+                    return .matched(original, copy)
+                }
+            }
+            throw RelayError("Gmail kept changing during match validation. Retry sync to recheck the pending pair.")
+        }
+
         var entries: [BacklogReport.Entry] = []
         for saved in (savedWork + discovered).sorted(by: { $0.originalID < $1.originalID }) {
             if saved.completed {
@@ -48,18 +108,15 @@ extension Sync {
                 continue
             }
 
-            // Refresh both members of the uniquely matched pair. Read the original
-            // last so its current unread status is checked immediately before a write.
-            let copy = try await secondary.message(id: copyID)
-            let original = try await primary.message(id: saved.originalID)
-            guard original.labelIds?.contains(labelID) == true,
-                  let originalDate = original.internalDate.flatMap(Int64.init), originalDate >= cutoff else {
-                entries.append(.init(saved: saved, outcome: .originalUnavailable))
+            let checked = try await recheck(saved, copyID: copyID, messageID: messageID, canSaveMatch: canSaveMatch)
+            let original: GmailMessage
+            let copy: GmailMessage
+            switch checked {
+            case .skipped(let entry):
+                entries.append(entry)
                 continue
-            }
-            guard IndexedMessage(original).messageID == messageID, IndexedMessage(copy).messageID == messageID else {
-                entries.append(.init(saved: saved, outcome: .matchChanged))
-                continue
+            case .matched(let checkedOriginal, let checkedCopy):
+                (original, copy) = (checkedOriginal, checkedCopy)
             }
             if canSaveMatch {
                 try rollout.saveMatch(originalID: saved.originalID, copyID: copyID, messageID: messageID)
@@ -83,4 +140,9 @@ extension Sync {
         }
         return BacklogReport(cutoffEpochMilliseconds: cutoff, entries: entries)
     }
+}
+
+private enum CheckedPair {
+    case matched(GmailMessage, GmailMessage)
+    case skipped(BacklogReport.Entry)
 }

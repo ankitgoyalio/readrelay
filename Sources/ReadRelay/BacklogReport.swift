@@ -151,17 +151,81 @@ struct IndexedMessage {
     let hasMultipleIDs: Bool
 
     init(_ message: GmailMessage) {
-        let headers = message.messageIDHeaders
-        let candidates = headers.flatMap { header in
-            Self.pattern.matches(in: header, range: NSRange(header.startIndex..., in: header)).compactMap { match in
-                Range(match.range, in: header).map { String(header[$0]) }
-            }
-        }
+        let headers = message.messageIDHeaders.map(Self.parse)
+        let candidates = headers.flatMap(\.candidates)
         self.message = message
         self.candidates = candidates
-        messageID = headers.count == 1 && candidates.count == 1 && headers.first == candidates.first
+        messageID = headers.count == 1 && candidates.count == 1 && headers.first?.wellFormed == true
             ? candidates.first
             : nil
         hasMultipleIDs = headers.count > 1 || candidates.count > 1
+    }
+
+    private static func parse(_ header: String) -> (candidates: [String], wellFormed: Bool) {
+        let units = Array(header.utf16)
+        let source = header as NSString
+        var candidates: [String] = []
+        var wellFormed = true
+        var malformedComment = false
+        var cursor = 0
+        while cursor < units.count {
+            if units[cursor] == 60, let match = pattern.firstMatch(
+                in: header, options: .anchored, range: NSRange(location: cursor, length: units.count - cursor)
+            ) {
+                candidates.append(source.substring(with: match.range))
+                cursor = NSMaxRange(match.range)
+                continue
+            }
+            if let end = whitespaceEnd(units, at: cursor) {
+                cursor = end
+                continue
+            }
+            if units[cursor] == 40, !malformedComment {
+                if let end = commentEnd(units, at: cursor) {
+                    cursor = end
+                    continue
+                }
+                // An invalid comment cannot hide a potential duplicate in the rest of the field.
+                malformedComment = true
+            }
+            wellFormed = false
+            cursor += 1
+        }
+        return (candidates, wellFormed)
+    }
+
+    private static func whitespaceEnd(_ units: [UInt16], at cursor: Int) -> Int? {
+        func isWSP(_ unit: UInt16) -> Bool { unit == 32 || unit == 9 }
+        if isWSP(units[cursor]) { return cursor + 1 }
+        if units[cursor] == 13, cursor + 2 < units.count, units[cursor + 1] == 10, isWSP(units[cursor + 2]) {
+            return cursor + 3
+        }
+        return nil
+    }
+
+    private static func commentEnd(_ units: [UInt16], at opening: Int) -> Int? {
+        var depth = 1
+        var cursor = opening + 1
+        while cursor < units.count {
+            switch units[cursor] {
+            case 40:
+                depth += 1
+            case 41:
+                depth -= 1
+                if depth == 0 { return cursor + 1 }
+            case 92:
+                // RFC 5322 quoted-pair, including obsolete US-ASCII pairs.
+                cursor += 1
+                guard cursor < units.count, units[cursor] <= 127 else { return nil }
+            case 33...39, 42...91, 93...126, 1...8, 11...12, 14...31, 127:
+                break
+            default:
+                guard let end = whitespaceEnd(units, at: cursor) else { return nil }
+                cursor = end
+                continue
+            }
+            cursor += 1
+        }
+        return nil
     }
 }

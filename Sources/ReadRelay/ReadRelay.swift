@@ -96,16 +96,12 @@ struct DryRun: AsyncParsableCommand {
     func run() async throws {
         let startedAt = Date()
         let configuration = try Configuration.load(path: config)
-        let primaryOAuth = try OAuth(role: .primary, configuration: configuration, configPath: config)
-        let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: config)
-        if unattended { try OAuth.preventKeychainPrompts() }
-        let primary = try await primaryOAuth.mailbox()
-        let labelID = try await primary.readRelayLabelID()
-        let secondary = try await secondaryOAuth.mailbox()
+        let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
         let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
         let backlog = try rollout.messages(in: .reviewed)
         let report = try await BacklogReport.scan(
-            primary: primary, secondary: secondary, labelID: labelID, cutoff: rollout.cutoff,
+            primary: mailboxes.primary, secondary: mailboxes.secondary,
+            labelID: mailboxes.readRelayLabelID, cutoff: rollout.cutoff,
             originalIDs: backlog.map { Set($0.map(\.originalID)) }
         )
         let output = try (backlog.map { report.rechecking($0) } ?? report).json()

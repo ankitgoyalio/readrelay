@@ -8,7 +8,7 @@ enum GoogleHTTP {
         return URLSession(configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
     }()
 
-    static func read<Value: Decodable>(_ request: URLRequest, operation: String) async throws -> Value {
+    static func send<Value: Decodable>(_ request: URLRequest, operation: String) async throws -> Value {
         let data: Data
         let response: URLResponse
         do {

@@ -192,7 +192,20 @@ final class CLITests: XCTestCase {
         XCTAssertNotEqual(target.originalID, control.originalID)
         XCTAssertNotEqual(copyID, control.forwardedCopyID)
 
-        let state = try temporaryDirectory().appendingPathComponent("state.sqlite")
+        let directory = try temporaryDirectory()
+        let state = directory.appendingPathComponent("state.sqlite")
+        let pendingState = directory.appendingPathComponent("pending.sqlite")
+        var reviewedCutoff: Int64?
+        if let reviewedPath = environment["READRELAY_SEEDED_REVIEWED_STATE"] {
+            guard !reviewedPath.isEmpty else {
+                XCTFail("Provide the path to a closed, reviewed SQLite state.")
+                return
+            }
+            let reviewedState = URL(fileURLWithPath: reviewedPath).resolvingSymlinksInPath()
+            try FileManager.default.copyItem(at: reviewedState, to: state)
+            reviewedCutoff = try XCTUnwrap(savedReviewCutoff(at: state), "The supplied state must contain a saved review.")
+            try FileManager.default.copyItem(at: state, to: pendingState)
+        }
         let options = ["--config", config, "--state", state.path]
         let before = try successfulReport(["dry-run"] + options)
         for expected in expectations {
@@ -208,11 +221,15 @@ final class CLITests: XCTestCase {
             return
         }
 
-        // A second preview preserves pending progress independently of the first
-        // write, reproducing the local state left by an interrupted save.
-        let pendingState = state.deletingLastPathComponent().appendingPathComponent("pending.sqlite")
+        // The second state stays pending independently of the first write,
+        // reproducing the local state left by an interrupted save.
         let pendingOptions = ["--config", config, "--state", pendingState.path]
         let pending = try successfulReport(["dry-run"] + pendingOptions)
+        if let reviewedCutoff, before.cutoffEpochMilliseconds != reviewedCutoff
+            || pending.cutoffEpochMilliseconds != reviewedCutoff {
+            XCTFail("Both previews must preserve the supplied review's cutoff.")
+            return
+        }
         guard pending.entries.first(where: { $0.originalID == target.originalID })?.outcome == "wouldMarkRead",
               pending.entries.first(where: { $0.originalID == target.originalID })?.forwardedCopyID == copyID else {
             XCTFail("The second preview must capture the same pending write.")
@@ -252,6 +269,19 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(repeated.entries.count, 1)
         XCTAssertEqual(repeated.entries.first?.outcome, "completed")
         XCTAssertEqual(try successfulReport(["dry-run"] + options).entries, after.entries)
+    }
+
+    private func savedReviewCutoff(at state: URL) -> Int64? {
+        var database: OpaquePointer?
+        defer { sqlite3_close(database) }
+        guard sqlite3_open_v2(state.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return nil }
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        let sql = "SELECT cutoff_ms FROM rollout WHERE singleton = 1 AND EXISTS (SELECT 1 FROM previewed_backlog)"
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_type(statement, 0) == SQLITE_INTEGER else { return nil }
+        return sqlite3_column_int64(statement, 0)
     }
 
     func testSyncDiscoversNewSeededOriginalsAfterApplyingTheReviewedBacklog() throws {
