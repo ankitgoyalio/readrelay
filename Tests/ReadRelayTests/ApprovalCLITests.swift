@@ -26,6 +26,44 @@ extension CLITests {
         XCTAssertTrue(result.error.contains("wait for a successful unattended preview"), result.error)
     }
 
+    func testApprovalRequiresAnUnattendedPreviewNewerThanTheLatestServiceFailure() throws {
+        let home = try temporaryDirectory()
+        let directory = try approvalFixture(home: home, evidence: true, approved: true)
+        let logs = directory.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let failureFile = logs.appendingPathComponent("latest-failure.json")
+        let oldSuccess = Date(timeIntervalSince1970: 1_700_000_000)
+        for offset in [1.0, -1.0] {
+            let failure = try JSONSerialization.data(withJSONObject: [
+                "date": oldSuccess.addingTimeInterval(offset).timeIntervalSinceReferenceDate,
+                "message": "Mailbox access failed."
+            ])
+            try failure.write(to: failureFile)
+
+            let result = try runCLI(["approve", "current-review"], home: home)
+            XCTAssertNotEqual(result.status, 0)
+            let expected = offset > 0 ? "wait for a successful unattended preview" : "Run readrelay verify-forwarding"
+            XCTAssertTrue(result.error.contains(expected), result.error)
+            XCTAssertTrue(try statusOutput(home: home).contains("Mode: Live"))
+        }
+    }
+
+    func testApprovalRequiresAnUnattendedPreviewNewerThanAGrantReplacement() throws {
+        let home = try temporaryDirectory()
+        let directory = try approvalFixture(home: home, evidence: true, approved: true)
+        let marker = directory.appendingPathComponent("grant-replacement.json")
+        let oldSuccess = Date(timeIntervalSince1970: 1_700_000_000)
+        for offset in [1.0, -1.0] {
+            try JSONEncoder().encode(oldSuccess.addingTimeInterval(offset)).write(to: marker)
+
+            let result = try runCLI(["approve", "current-review"], home: home)
+            XCTAssertNotEqual(result.status, 0)
+            let expected = offset > 0 ? "wait for a successful unattended preview" : "Run readrelay verify-forwarding"
+            XCTAssertTrue(result.error.contains(expected), result.error)
+            XCTAssertTrue(try statusOutput(home: home).contains("Mode: Live"))
+        }
+    }
+
     func testApprovalRequiresForwardingProofForTheSavedLabelID() throws {
         let home = try temporaryDirectory()
         let directory = try approvalFixture(home: home, evidence: true)
@@ -168,6 +206,26 @@ extension CLITests {
         XCTAssertNotEqual(result.status, 0)
         XCTAssertTrue(result.error.contains("for the Homebrew setup"), result.error)
         XCTAssertTrue(try statusOutput(home: home).contains("Mode: Preview"))
+    }
+
+    func testDocumentedManualLaunchAgentPathsWorkAlongsideBetaState() throws {
+        let home = try temporaryDirectory()
+        let directory = try approvalFixture(home: home, evidence: true)
+        let config = directory.appendingPathComponent("readrelay.json")
+        try FileManager.default.copyItem(at: directory.appendingPathComponent("config.json"), to: config)
+        let state = directory.appendingPathComponent("launchd-preview.sqlite")
+
+        let agent = try runCLI([
+            "launch-agent", "--executable", directory.appendingPathComponent("bin/readrelay").path,
+            "--config", config.path, "--state", state.path,
+            "--log-directory", directory.appendingPathComponent("logs/preview").path
+        ], home: home)
+        XCTAssertEqual(agent.status, 0, agent.error)
+        let plist = try PropertyListSerialization.propertyList(from: agent.output, options: [], format: nil)
+        let arguments = try XCTUnwrap((plist as? [String: Any])?["ProgramArguments"] as? [String])
+        let preview = try runCLI(Array(arguments.dropFirst()), home: home)
+        XCTAssertNotEqual(preview.status, 0)
+        XCTAssertTrue(preview.error.contains("Could not read the Google Desktop OAuth client JSON"), preview.error)
     }
 
     private func statusOutput(home: URL) throws -> String {

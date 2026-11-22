@@ -64,7 +64,7 @@ Once the primary label exists, you can preview even if you are still diagnosing 
 readrelay preview
 ```
 
-The first successful preview saves a five-day backlog of labeled originals. The summary shows how many forwarded copies would be marked read and why other originals were skipped. Check the secondary inbox without opening the test copy to confirm it stays unread after preview. If its original was in the saved backlog when you opened it and its unique copy is unread, the report proposes a change. If you saved an empty backlog before staging test mail, you can still verify the new pair. Live runs discover eligible originals after processing the saved backlog.
+The first successful preview saves the labeled originals from the 120 hours before that attempt started. Until the backlog is saved, each retry starts with a fresh five-day window. The summary shows how many forwarded copies would be marked read and why other originals were skipped. Check the secondary inbox without opening the test copy to confirm it stays unread after preview. If its original was in the saved backlog when you opened it and its unique copy is unread, the report proposes a change. If you saved an empty backlog before staging test mail, you can still verify the new pair. Live runs discover eligible originals after processing the saved backlog.
 
 ReadRelay prints the path to its detailed JSON report. To read the exact report you just reviewed, replace the example with the printed path, keeping the quotes.
 
@@ -91,13 +91,13 @@ If status reports that Keychain access requires interaction, unlock your login K
 
 ## Approve recurring sync
 
-After verifying forwarding and seeing a successful background preview in `readrelay status`, run `readrelay preview`. Review the mailbox pair, primary label, and proposed changes. The preview also gives you the path to the detailed JSON report.
+After verifying forwarding and seeing a successful Homebrew preview in `readrelay status`, run `readrelay preview`. If the service has failed since its last preview or you’ve replaced either mailbox grant, wait for the Homebrew job to complete a new preview before approving. Review the mailbox pair, primary label, and proposed changes. The preview also gives you the path to the detailed JSON report.
 
-Copy the `readrelay approve` command printed by the preview, including its review code. This approves the saved five-day backlog and future eligible messages for the displayed pair and label. If ReadRelay reports that the preview changed, run `readrelay preview` and review the new report before approving it.
+Copy the `readrelay approve` command printed by the preview, including its review code. This approves the work shown and future eligible messages for the displayed pair and label. If ReadRelay reports that the preview changed, run `readrelay preview` and review the new report before approving it.
 
 Check `readrelay status` for **Live** mode. Gmail updates begin on the next background run. The first live run handles the saved backlog. Later runs also discover eligible originals and retry pending work, including originals you leave unread for more than five days.
 
-Pause background sync with `brew services stop ankitgoyalio/readrelay/readrelay`. Starting the service again preserves approval and pending work. To withdraw approval while leaving the schedule in place, run `readrelay revoke`. If a run is active, wait for it to finish and retry the revoke command. Once revoke succeeds, the service runs in **Preview** mode.
+Pause background sync with `brew services stop ankitgoyalio/readrelay/readrelay`. Starting the service again preserves approval and pending work. To withdraw approval while leaving the schedule in place, run `readrelay revoke`. If a run is active, wait for it to finish and retry the revoke command. Once revoke succeeds, the service runs in **Preview** mode. If live sync has already processed the initial backlog, a new preview shows saved pending work and newly eligible originals. Completed pairs stay excluded even if their copies were marked unread again.
 
 ## Reconnect a Gmail mailbox
 

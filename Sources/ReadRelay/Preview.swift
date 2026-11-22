@@ -2,7 +2,7 @@ import ArgumentParser
 import Foundation
 
 struct Preview: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Preview read-status changes for the initial backlog.")
+    static let configuration = CommandConfiguration(abstract: "Preview read-status changes for the configured mailbox pair.")
 
     @Flag(help: "Print the JSON report instead of the summary.")
     var json = false
@@ -18,9 +18,10 @@ struct Preview: AsyncParsableCommand {
             let configuration = try paths.loadConfiguration()
             let mailboxes = try await paths.connect(configuration: configuration, unattended: unattended)
             let rollout = try RolloutState(
-                path: paths.state(for: configuration).path, configuration: configuration, previewStartedAt: startedAt
+                path: paths.state(for: configuration).path, configuration: configuration,
+                preview: .beta(startedAt)
             )
-            let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout, beta: true)
+            let report = try await BacklogReport.betaPreview(mailboxes: mailboxes, rollout: rollout, configuration: configuration)
             let output = try report.json() + "\n"
             let data = Data(output.utf8)
             let reportFile = paths.previewReport(for: configuration)
@@ -34,7 +35,7 @@ struct Preview: AsyncParsableCommand {
                 print("Primary label: \(configuration.primaryLabel)")
                 print(report.summary())
                 print("JSON report saved to \(reportFile.path)")
-                print("To approve this backlog and future eligible messages in this scope, run:")
+                print("To approve the reviewed work and future eligible messages in this scope, run:")
                 print("  readrelay approve \(code)")
             }
         }
@@ -44,7 +45,7 @@ struct Preview: AsyncParsableCommand {
 extension BacklogReport {
     func summary() -> String {
         guard !entries.isEmpty else {
-            return "No labeled originals in the saved five-day backlog."
+            return "No pending eligible originals to review."
         }
         let outcomes = Dictionary(grouping: entries, by: \.outcome).mapValues(\.count)
         let proposed = outcomes[.wouldMarkRead, default: 0]

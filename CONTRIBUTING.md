@@ -87,6 +87,8 @@ Use the opt-in [clean-login acceptance checklist](docs/beta-acceptance.md) for t
 - To check review code freshness, run `readrelay preview` twice after verifying forwarding and seeing a successful Homebrew preview. Confirm approval with the first code is rejected. Review the current report and approve with the latest code.
 - To check a changed scope, change the primary label or delete and recreate it with the same name. Confirm the previous approval leaves the new label's copies unread. Follow the [public guide](README.md#change-the-mailbox-pair-or-primary-label) to verify the new scope and review it before approval.
 - To check reconnect rejection, use the checklist's disconnected-grant case. First reconnect with a separate test account outside the mailbox pair that has permission to authorize the test project. If Google offers granular consent, also try leaving the required permission unchecked for the configured account. Each attempt should fail. Confirm that the pending copy stays unread and no new success is recorded before reconnecting with the correct account and scope. Repeat with the other role and a fresh pending pair if testing both roles.
+- To check review after revoke, let Live mode complete one read pair and discover a second pair whose original and copy are unread. After revoking, mark the completed copy unread again. Temporarily remove the label from the pending original and confirm `readrelay preview --json` reports it as `originalUnavailable`. Restore the label and read the pending original. Review a new preview and confirm it proposes that copy, omits the completed original, and leaves both copies unread. After a successful Homebrew preview, approve the unchanged report and confirm only the pending copy changes.
+- To check proof after reconnect, obtain a foreground review code and a successful Homebrew preview in Preview mode, then stop the Homebrew job. Reconnect one mailbox successfully while stopped and confirm approval requires a newer unattended preview. A new foreground preview alone should still leave approval blocked. Start Homebrew and wait for its successful preview, then confirm the current review code can be approved if the reviewed messages have not changed.
 
 ### Verify a known forwarding pair
 
@@ -97,6 +99,12 @@ For the recent-message check, use a label with exactly one original in the five-
 ```fish
 env READRELAY_FORWARDING_TEST_SETUP="/path/to/ReadRelay" READRELAY_FORWARDING_TEST_RECENT_MESSAGE_ID='<recent@example.com>' swift test --filter testVerifyForwardingAcceptsAnAlreadyReadPairAndPreservesItsLabels
 env READRELAY_FORWARDING_TEST_SETUP="/path/to/ReadRelay" READRELAY_FORWARDING_TEST_OLDER_MESSAGE_ID='<older@example.com>' swift test --filter testVerifyForwardingFindsAPairOutsideAnEmptyPreview
+```
+
+With the same recent-message setup, the two beta preview tests stage an earlier failed scan and saved recurring work in temporary SQLite files. They check that a retry saves a fresh cutoff, later previews keep it, and recurring previews show missing pending originals while omitting completed ones.
+
+```fish
+env READRELAY_FORWARDING_TEST_SETUP="/path/to/ReadRelay" READRELAY_FORWARDING_TEST_RECENT_MESSAGE_ID='<recent@example.com>' swift test --filter testBetaPreview
 ```
 
 ### Preview and sync seeded pairs

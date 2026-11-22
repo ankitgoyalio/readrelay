@@ -21,9 +21,7 @@ struct Approve: AsyncParsableCommand {
             let rollout = try RolloutState(path: state.path, configuration: configuration)
             guard let scope = try rollout.betaScope(), scope.reviewCode == reviewCode,
                   let digest = scope.reportDigest else { throw reviewRequired }
-            guard try rollout.lastHomebrewPreview() != nil else {
-                throw RelayError("Start ReadRelay with brew services and wait for a successful unattended preview in readrelay status.")
-            }
+            try paths.requireFreshHomebrewPreview(rollout: rollout, configuration: configuration)
             // Check the local evidence first. Preview then verifies the saved scope against Gmail's current label ID.
             let proofRequired = RelayError("Run readrelay verify-forwarding with a known test Message-ID before approving writes.")
             guard try paths.hasForwardingProof(for: configuration, labelID: scope.labelID) else {
@@ -34,7 +32,7 @@ struct Approve: AsyncParsableCommand {
             guard let savedReport = try? Data(contentsOf: paths.previewReport(for: configuration)),
                   reviewDigest(savedReport) == digest else { throw changed }
             let mailboxes = try await paths.connect(configuration: configuration, unattended: false)
-            let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout, beta: true)
+            let report = try await BacklogReport.betaPreview(mailboxes: mailboxes, rollout: rollout, configuration: configuration)
             guard Data((try report.json() + "\n").utf8) == savedReport else { throw changed }
             try rollout.approveReview()
         }

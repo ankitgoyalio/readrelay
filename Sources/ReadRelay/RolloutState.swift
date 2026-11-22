@@ -16,12 +16,26 @@ final class RolloutState {
     }
 
     private let database: OpaquePointer
-    let cutoff: Int64
+    private let cutoffForAttempt: Int64?
 
-    init(path: String, configuration: Configuration, previewStartedAt: Date? = nil) throws {
+    var cutoff: Int64 {
+        get throws {
+            guard let cutoffForAttempt else {
+                throw RelayError("Could not load the initial cutoff. Run a successful dry run before syncing.")
+            }
+            return cutoffForAttempt
+        }
+    }
+
+    enum PreviewStart {
+        case manual(Date)
+        case beta(Date)
+    }
+
+    init(path: String, configuration: Configuration, preview: PreviewStart? = nil) throws {
         guard !path.isEmpty else { throw RelayError("Provide a path for the SQLite rollout state.") }
         let filePath = URL(fileURLWithPath: path).path
-        let create = previewStartedAt != nil
+        let create = preview != nil
         if !create, !FileManager.default.fileExists(atPath: filePath) {
             throw RelayError("Run a successful dry run with this SQLite state before syncing.")
         }
@@ -66,29 +80,21 @@ final class RolloutState {
                 throw labelMismatch
             }
             let labelColumn = recordsLabel ? ", primary_label" : ""
-            if let previewStartedAt {
-                let fiveDays: TimeInterval = 5 * 24 * 60 * 60
-                let initialCutoff = Int64(previewStartedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
-                let labelParameter = recordsLabel ? ", ?" : ""
-                try Self.prepare("""
-                    INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms\(labelColumn))
-                    VALUES (1, ?, ?, ?\(labelParameter)) ON CONFLICT(singleton) DO NOTHING
-                    """, in: handle) { statement in
-                    try Self.bind(primary, to: statement, at: 1)
-                    try Self.bind(secondary, to: statement, at: 2)
-                    guard sqlite3_bind_int64(statement, 3, initialCutoff) == SQLITE_OK else {
-                        throw RelayError("Could not bind the initial cutoff.")
-                    }
-                    if recordsLabel { try Self.bind(configuration.primaryLabel, to: statement, at: 4) }
-                    try Self.finish(statement)
-                }
+            func fiveDayCutoff(from start: Date) -> Int64 {
+                Int64(start.addingTimeInterval(-5 * 24 * 60 * 60).timeIntervalSince1970 * 1_000)
+            }
+            if case .manual(let start) = preview {
+                try Self.saveRollout(configuration, cutoff: fiveDayCutoff(from: start), recordsLabel: recordsLabel,
+                                     onConflict: "DO NOTHING", in: handle)
             }
 
-            cutoff = try Self.prepare(
+            let savedCutoff: Int64? = try Self.prepare(
                 "SELECT primary_email, secondary_email, cutoff_ms\(labelColumn) FROM rollout WHERE singleton = 1",
                 in: handle
             ) { statement in
-                guard sqlite3_step(statement) == SQLITE_ROW,
+                let status = sqlite3_step(statement)
+                if status == SQLITE_DONE { return nil }
+                guard status == SQLITE_ROW,
                       sqlite3_column_type(statement, 2) == SQLITE_INTEGER else {
                     throw RelayError("Could not load the initial cutoff. Run a successful dry run before syncing.")
                 }
@@ -98,11 +104,37 @@ final class RolloutState {
                 if recordsLabel, Self.columnText(statement, 3) != configuration.primaryLabel { throw labelMismatch }
                 return sqlite3_column_int64(statement, 2)
             }
+            if case .beta(let start) = preview, try !Self.hasTable(Batch.reviewed.rawValue, in: handle) {
+                // A failed scan has no backlog, including state left by older beta builds.
+                cutoffForAttempt = fiveDayCutoff(from: start)
+            } else {
+                cutoffForAttempt = savedCutoff
+            }
         } catch {
             sqlite3_close(handle)
             throw error
         }
         database = handle
+    }
+
+    private static func saveRollout(
+        _ configuration: Configuration, cutoff: Int64, recordsLabel: Bool,
+        onConflict: String, in database: OpaquePointer
+    ) throws {
+        let labelColumn = recordsLabel ? ", primary_label" : ""
+        let labelParameter = recordsLabel ? ", ?" : ""
+        try prepare("""
+            INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms\(labelColumn))
+            VALUES (1, ?, ?, ?\(labelParameter)) ON CONFLICT(singleton) \(onConflict)
+            """, in: database) { statement in
+            try bind(configuration.primaryEmail.lowercased(), to: statement, at: 1)
+            try bind(configuration.secondaryEmail.lowercased(), to: statement, at: 2)
+            guard sqlite3_bind_int64(statement, 3, cutoff) == SQLITE_OK else {
+                throw RelayError("Could not bind the initial cutoff.")
+            }
+            if recordsLabel { try bind(configuration.primaryLabel, to: statement, at: 4) }
+            try finish(statement)
+        }
     }
 
     deinit { sqlite3_close(database) }
@@ -123,7 +155,7 @@ final class RolloutState {
     }
 
     // The table is published with the entire first successful report, including an empty backlog.
-    func savePreview(_ report: BacklogReport, betaLabelID: String?) throws {
+    func savePreview(_ report: BacklogReport, beta: (configuration: Configuration, labelID: String)? = nil) throws {
         try transaction {
             guard try !Self.hasTable(Batch.reviewed.rawValue, in: database) else {
                 throw RelayError("Another dry run saved the backlog. Run dry-run again to review it.")
@@ -133,7 +165,9 @@ final class RolloutState {
                 Message(originalID: entry.originalID, copyID: entry.forwardedCopyID,
                         messageID: entry.messageID, completed: false)
             }, into: .reviewed)
-            if let betaLabelID {
+            if let beta {
+                try Self.saveRollout(beta.configuration, cutoff: report.cutoffEpochMilliseconds, recordsLabel: true,
+                                     onConflict: "DO UPDATE SET cutoff_ms = excluded.cutoff_ms", in: database)
                 try Self.execute("""
                     CREATE TABLE beta_scope (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -145,7 +179,7 @@ final class RolloutState {
                     )
                     """, in: database)
                 try Self.prepare("INSERT INTO beta_scope (singleton, label_id) VALUES (1, ?)", in: database) {
-                    try Self.bind(betaLabelID, to: $0, at: 1)
+                    try Self.bind(beta.labelID, to: $0, at: 1)
                     try Self.finish($0)
                 }
             }
@@ -325,6 +359,12 @@ final class RolloutState {
                 ))
             }
         }
+    }
+
+    func currentWork() throws -> (batch: Batch, messages: [Message])? {
+        guard try Self.hasTable(Batch.reviewed.rawValue, in: database) else { return nil }
+        if let ongoing = try messages(in: .ongoing) { return (.ongoing, ongoing) }
+        return try messages(in: .reviewed).map { (.reviewed, $0) }
     }
 
     func saveMatch(originalID: String, copyID: String, messageID: String) throws {

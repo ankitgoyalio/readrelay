@@ -36,10 +36,7 @@ struct Status: ParsableCommand {
         }
         if let setupMessage { print(setupMessage) }
         print("Last successful run: \(lastSuccess?.ISO8601Format() ?? "None")")
-        let failureFile = paths.serviceFailure(for: configuration)
-        if files.fileExists(atPath: failureFile.path) {
-            let data = try Data(contentsOf: failureFile)
-            let failure = try JSONDecoder().decode(ServiceFailure.self, from: data)
+        if let failure = try paths.latestServiceFailure(for: configuration) {
             let recovery = lastSuccess.map { $0 > failure.date } == true ? " (followed by a successful run)" : ""
             print("Latest failure: \(failure.date.ISO8601Format())\(recovery) — \(failure.message)")
         } else {

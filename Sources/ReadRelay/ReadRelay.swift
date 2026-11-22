@@ -125,13 +125,23 @@ struct Authorize: AsyncParsableCommand {
             try paths.requireManualPaths(config)
             let configuration = try Configuration.load(path: config)
             let oauth = try OAuth(role: role, configuration: configuration, configPath: config)
-            try await oauth.authorize(importToken: importToken)
+            let token = try await oauth.verifiedRefreshToken(importToken: importToken)
+            if FileManager.default.fileExists(atPath: paths.config.path) {
+                try await paths.withLock {
+                    try paths.recordGrantReplacementIfShared(with: [oauth])
+                    try oauth.storeRefreshToken(token)
+                }
+            } else {
+                try oauth.storeRefreshToken(token)
+            }
         } else {
             _ = try paths.loadConfiguration()
             try await paths.withLock {
                 let configuration = try paths.loadConfiguration()
                 let oauth = try OAuth(role: role, configuration: configuration, configPath: paths.config.path)
-                try await oauth.authorize(importToken: importToken)
+                let token = try await oauth.verifiedRefreshToken(importToken: importToken)
+                try paths.recordGrantReplacement(for: configuration)
+                try oauth.storeRefreshToken(token)
             }
         }
         print("Authorized the \(role.rawValue) Gmail mailbox.")
@@ -155,7 +165,7 @@ struct DryRun: AsyncParsableCommand {
         try BetaPaths().requireManualPaths(config, state)
         let configuration = try Configuration.load(path: config)
         let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
-        let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
+        let rollout = try RolloutState(path: state, configuration: configuration, preview: .manual(startedAt))
         let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout)
         print(try report.json())
     }

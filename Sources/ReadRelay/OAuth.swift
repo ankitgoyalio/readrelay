@@ -77,15 +77,11 @@ struct OAuth {
         self.client = client
     }
 
-    func authorize(importToken: Bool) async throws {
-        let refreshToken: String
-        if importToken {
-            refreshToken = try RefreshTokenImport.read(role: role, email: email, client: client)
-            _ = try await verifiedMailbox(refreshToken: refreshToken)
-        } else {
-            refreshToken = try await requestVerifiedRefreshToken()
-        }
-        try storeRefreshToken(refreshToken)
+    func verifiedRefreshToken(importToken: Bool) async throws -> String {
+        guard importToken else { return try await requestVerifiedRefreshToken() }
+        let refreshToken = try RefreshTokenImport.read(role: role, email: email, client: client)
+        _ = try await verifiedMailbox(refreshToken: refreshToken)
+        return refreshToken
     }
 
     func requestVerifiedRefreshToken() async throws -> String {
@@ -126,7 +122,7 @@ struct OAuth {
         }
     }
 
-    private var keychainAccount: String {
+    var keychainAccount: String {
         "\(role.rawValue):\(email.lowercased()):\(client.clientID)"
     }
 

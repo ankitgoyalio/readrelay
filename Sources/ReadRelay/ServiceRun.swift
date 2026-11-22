@@ -19,7 +19,8 @@ struct ServiceRun: AsyncParsableCommand {
                 activeConfiguration = configuration
                 let mailboxes = try await paths.connect(configuration: configuration, unattended: true)
                 let rollout = try RolloutState(
-                    path: paths.state(for: configuration).path, configuration: configuration, previewStartedAt: startedAt
+                    path: paths.state(for: configuration).path, configuration: configuration,
+                    preview: .beta(startedAt)
                 )
 
                 if try rollout.betaScope()?.approvedReviewCode != nil {
@@ -33,7 +34,7 @@ struct ServiceRun: AsyncParsableCommand {
                     try rollout.recordLiveRun(at: date)
                     try Self.log("Live sync succeeded", at: date, to: paths.serviceLog)
                 } else {
-                    _ = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout, beta: true)
+                    _ = try await BacklogReport.betaPreview(mailboxes: mailboxes, rollout: rollout, configuration: configuration)
                     let date = Date()
                     try rollout.recordHomebrewPreview(at: date)
                     try Self.log("Preview succeeded", at: date, to: paths.serviceLog)

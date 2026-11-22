@@ -22,19 +22,43 @@ struct BetaPaths {
     }
 
     func requireManualPaths(_ paths: String...) throws {
-        let root = directory.resolvingSymlinksInPath().path
+        let roots = [directory.standardizedFileURL, directory.resolvingSymlinksInPath()].map {
+            $0.path.lowercased()
+        }
         for path in paths {
             let url = URL(fileURLWithPath: path)
             let resolved = url.resolvingSymlinksInPath().path
             let parent = url.deletingLastPathComponent().resolvingSymlinksInPath()
             let resolvedParentPath = parent.appendingPathComponent(url.lastPathComponent).path
-            if [url.standardizedFileURL.path, resolved, resolvedParentPath].contains(where: {
-                $0 == root || $0.hasPrefix(root + "/")
+            let candidates = [url.standardizedFileURL.path, resolved, resolvedParentPath].map { $0.lowercased() }
+            if candidates.contains(where: { path in
+                roots.contains { root in
+                    if path == root { return true }
+                    guard path.hasPrefix(root + "/") else { return false }
+                    return Self.isBetaArtifact(String(path.dropFirst(root.count + 1)))
+                }
             }) {
                 throw RelayError("Use readrelay preview, approve, and revoke for the Homebrew setup.")
             }
         }
     }
+
+    private static func isBetaArtifact(_ path: String) -> Bool {
+        if ["config.json", "beta.lock", "logs/service.log"].contains(path) { return true }
+        let files = [
+            ("state", ".sqlite"), ("state", ".sqlite-journal"), ("state", ".sqlite-shm"), ("state", ".sqlite-wal"),
+            ("oauth-client", ".json"), ("preview", ".json"), ("forwarding-proof", ".json"), ("grant-replacement", ".json"),
+            ("logs/latest-failure", ".json")
+        ]
+        return files.contains { name, extensionSuffix in
+            if path == name + extensionSuffix { return true }
+            let prefix = name + "-"
+            guard path.hasPrefix(prefix), path.hasSuffix(extensionSuffix) else { return false }
+            let scope = path.dropFirst(prefix.count).dropLast(extensionSuffix.count)
+            return UUID(uuidString: String(scope)) != nil
+        }
+    }
+
     var logs: URL { directory.appendingPathComponent("logs", isDirectory: true) }
     func previewReport(for configuration: Configuration) -> URL {
         scopeFile("preview", extension: "json", for: configuration)
@@ -43,6 +67,46 @@ struct BetaPaths {
     func serviceFailure(for configuration: Configuration?) -> URL {
         let suffix = configuration?.scopeID.map { "-\($0.uuidString)" } ?? ""
         return logs.appendingPathComponent("latest-failure\(suffix).json")
+    }
+
+    func latestServiceFailure(for configuration: Configuration?) throws -> ServiceFailure? {
+        let files = configuration?.scopeID == nil
+            ? [serviceFailure(for: nil)]
+            : [serviceFailure(for: configuration), serviceFailure(for: nil)]
+        return try files.compactMap { try readEvidence(ServiceFailure.self, at: $0) }
+            .max { $0.date < $1.date }
+    }
+
+    func requireFreshHomebrewPreview(rollout: RolloutState, configuration: Configuration) throws {
+        let replacement = try readEvidence(Date.self, at: grantReplacement(for: configuration))
+        let failure = try latestServiceFailure(for: configuration)?.date
+        guard let preview = try rollout.lastHomebrewPreview(),
+              [replacement, failure].compactMap({ $0 }).allSatisfy({ preview > $0 }) else {
+            throw RelayError("Start ReadRelay with brew services and wait for a successful unattended preview in readrelay status. If the service is in Live mode, run readrelay revoke before seeking a new approval.")
+        }
+    }
+
+    // Record the change before saving into Keychain so an interrupted replacement cannot leave stale proof.
+    func recordGrantReplacement(for configuration: Configuration) throws {
+        try JSONEncoder().encode(Date()).write(to: grantReplacement(for: configuration), options: .atomic)
+    }
+
+    func recordGrantReplacementIfShared(with accounts: [OAuth]) throws {
+        guard let configuration = try? loadConfiguration() else { return }
+        let sharesGrant = accounts.contains { account in
+            let saved = try? OAuth(role: account.role, configuration: configuration, configPath: config.path)
+            return saved?.keychainAccount == account.keychainAccount
+        }
+        if sharesGrant { try recordGrantReplacement(for: configuration) }
+    }
+
+    private func grantReplacement(for configuration: Configuration) -> URL {
+        scopeFile("grant-replacement", extension: "json", for: configuration)
+    }
+
+    private func readEvidence<Value: Decodable>(_ type: Value.Type, at url: URL) throws -> Value? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: url))
     }
 
     func prepare() throws {

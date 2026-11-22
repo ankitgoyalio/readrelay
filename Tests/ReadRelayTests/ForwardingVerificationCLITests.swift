@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import XCTest
 
 extension CLITests {
@@ -46,9 +47,55 @@ extension CLITests {
         XCTAssertEqual(try forwardingPreview(home: home), before)
     }
 
+    func testBetaPreviewUsesARecentCutoffAfterAnEarlierFailedScan() throws {
+        let (home, _) = try forwardingFixture("READRELAY_FORWARDING_TEST_RECENT_MESSAGE_ID")
+        _ = try forwardingPreview(home: home)
+        try stageBetaState(home: home, sql: """
+            DROP TABLE beta_scope;
+            DROP TABLE previewed_backlog;
+            UPDATE rollout SET cutoff_ms = 1700000000000;
+            """)
+
+        let fiveDaysAgo = Date().addingTimeInterval(-120 * 60 * 60)
+        let first = try JSONDecoder().decode(ForwardingPreview.self, from: forwardingPreview(home: home))
+        XCTAssertGreaterThanOrEqual(first.cutoffEpochMilliseconds, Int64(fiveDaysAgo.timeIntervalSince1970 * 1_000))
+        let repeated = try JSONDecoder().decode(ForwardingPreview.self, from: forwardingPreview(home: home))
+        XCTAssertEqual(repeated.cutoffEpochMilliseconds, first.cutoffEpochMilliseconds)
+    }
+
+    func testBetaPreviewReportsSavedPendingWorkAndOmitsCompletedOriginals() throws {
+        let (home, _) = try forwardingFixture("READRELAY_FORWARDING_TEST_RECENT_MESSAGE_ID")
+        let first = try JSONDecoder().decode(ForwardingPreview.self, from: forwardingPreview(home: home))
+        XCTAssertEqual(first.entries.count, 1, "Use a label with one recent test pair.")
+        try stageBetaState(home: home, sql: """
+            CREATE TABLE sync_work AS SELECT * FROM previewed_backlog;
+            UPDATE sync_work SET completed = 1;
+            INSERT INTO sync_work VALUES ('pending-unavailable', NULL, NULL, 0);
+            """)
+
+        let recurring = try JSONDecoder().decode(ForwardingPreview.self, from: forwardingPreview(home: home))
+        XCTAssertEqual(recurring.cutoffEpochMilliseconds, first.cutoffEpochMilliseconds)
+        XCTAssertEqual(recurring.entries.map(\.originalID), ["pending-unavailable"])
+        XCTAssertEqual(recurring.entries.map(\.outcome), ["originalUnavailable"])
+    }
+
     private struct ForwardingPreview: Decodable {
-        struct Entry: Decodable { let outcome: String }
+        struct Entry: Decodable {
+            let originalID: String
+            let outcome: String
+        }
+        let cutoffEpochMilliseconds: Int64
         let entries: [Entry]
+    }
+
+    private func stageBetaState(home: URL, sql: String) throws {
+        let directory = home.appendingPathComponent("Library/Application Support/ReadRelay")
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let state = try XCTUnwrap(files.first { $0.pathExtension == "sqlite" })
+        var database: OpaquePointer?
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_open_v2(state.path, &database, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, sql, nil, nil, nil), SQLITE_OK)
     }
 
     private func forwardingFixture(_ messageVariable: String) throws -> (home: URL, messageID: String) {

@@ -37,6 +37,16 @@ struct BacklogReport: Encodable {
         func matches(_ saved: RolloutState.Message) -> Bool {
             forwardedCopyID != nil && forwardedCopyID == saved.copyID && messageID == saved.messageID
         }
+
+        func canClaimMatch(for saved: RolloutState.Message, claimedCopies: Set<String>) -> Bool {
+            guard let forwardedCopyID, let messageID else { return false }
+            return saved.copyID == nil && (saved.messageID == nil || saved.messageID == messageID)
+                && !claimedCopies.contains(forwardedCopyID)
+        }
+
+        var discoveredWork: RolloutState.Message {
+            RolloutState.Message(originalID: originalID, copyID: nil, messageID: messageID, completed: false)
+        }
     }
 
     enum Outcome: String, Encodable {
@@ -73,20 +83,68 @@ struct BacklogReport: Encodable {
         return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds, entries: checked)
     }
 
-    static func preview(mailboxes: RelayMailboxes, rollout: RolloutState, beta: Bool = false) async throws -> Self {
+    static func preview(mailboxes: RelayMailboxes, rollout: RolloutState) async throws -> Self {
         let backlog = try rollout.messages(in: .reviewed)
-        if beta, backlog != nil { try rollout.requireBetaLabel(mailboxes.readRelayLabelID) }
         let report = try await scan(
             primary: mailboxes.primary, secondary: mailboxes.secondary,
             labelID: mailboxes.readRelayLabelID, cutoff: rollout.cutoff,
             originalIDs: backlog.map { Set($0.map(\.originalID)) }
         )
         if let backlog { return report.rechecking(backlog) }
-        try rollout.savePreview(report, betaLabelID: beta ? mailboxes.readRelayLabelID : nil)
+        try rollout.savePreview(report)
         return report
     }
 
+    static func betaPreview(
+        mailboxes: RelayMailboxes, rollout: RolloutState, configuration: Configuration
+    ) async throws -> Self {
+        let labelID = mailboxes.readRelayLabelID
+        if let work = try rollout.currentWork() {
+            try rollout.requireBetaLabel(labelID)
+            let discover = work.batch == .ongoing
+            let report = try await scan(mailboxes: mailboxes, cutoff: rollout.cutoff, work: work.messages, discover: discover)
+            return report.recheckingRunnable(work.messages, discover: discover)
+        }
+
+        let report = try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: labelID, cutoff: rollout.cutoff
+        )
+        try rollout.savePreview(report, beta: (configuration, labelID))
+        return report
+    }
+
+    private func recheckingRunnable(_ work: [RolloutState.Message], discover: Bool) -> Self {
+        let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.originalID, $0) })
+        let knownOriginals = Set(work.map(\.originalID))
+        let discovered = entries.filter { !knownOriginals.contains($0.originalID) }.map(\.discoveredWork)
+        let pending = (work + discovered).filter { !$0.completed }
+        let claimedCopies = Set(work.compactMap(\.copyID))
+        let rechecked = pending.map { saved -> Entry in
+            guard let current = byID[saved.originalID] else {
+                return Entry(saved: saved, outcome: .originalUnavailable)
+            }
+            if current.forwardedCopyID != nil, !current.matches(saved),
+               !(discover && current.canClaimMatch(for: saved, claimedCopies: claimedCopies)) {
+                return Entry(saved: saved, outcome: .matchChanged)
+            }
+            return current
+        }
+        return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds,
+                    entries: rechecked.sorted { $0.originalID < $1.originalID })
+    }
+
     static func scan(
+        mailboxes: RelayMailboxes, cutoff: Int64, work: [RolloutState.Message], discover: Bool
+    ) async throws -> Self {
+        let originalIDs = discover ? nil : Set(work.filter { !$0.completed }.map(\.originalID))
+        let completedIDs = Set(work.filter(\.completed).map(\.originalID))
+        return try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: mailboxes.readRelayLabelID,
+            cutoff: cutoff, originalIDs: originalIDs, excludingOriginalIDs: completedIDs
+        )
+    }
+
+    private static func scan(
         primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64,
         originalIDs: Set<String>? = nil, excludingOriginalIDs: Set<String> = []
     ) async throws -> Self {

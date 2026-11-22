@@ -61,6 +61,7 @@ struct Setup: AsyncParsableCommand {
             try clientData.write(
                 to: configuration.clientFile(for: .primary, relativeTo: paths.config.path), options: .atomic
             )
+            if replace { try paths.recordGrantReplacementIfShared(with: oauth) }
             for (account, token) in tokens {
                 try account.storeRefreshToken(token)
             }
