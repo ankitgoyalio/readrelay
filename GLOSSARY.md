@@ -10,7 +10,11 @@ The Gmail mailbox where the user receives and reads the original message.
 
 **Secondary mailbox**
 
-The Gmail mailbox that receives forwarded copies and supplies messages for Dot’s digest.
+The Gmail mailbox that receives forwarded copies from the primary mailbox.
+
+**Mailbox pair**
+
+The primary mailbox and its dedicated secondary mailbox, linked for one-way read-status sync.
 
 **Original message**
 
