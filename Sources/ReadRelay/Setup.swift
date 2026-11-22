@@ -16,12 +16,17 @@ struct Setup: AsyncParsableCommand {
     @Option(help: "Label applied to originals by the primary Gmail forwarding filter.")
     var primaryLabel = Configuration.defaultPrimaryLabel
 
+    @Flag(help: "Replace the configured mailbox pair and start a fresh review.")
+    var replace = false
+
     func run() async throws {
         let paths = BetaPaths()
+        let scopeID = UUID()
         let configuration = Configuration(
             primaryEmail: primaryEmail.trimmingCharacters(in: .whitespacesAndNewlines),
             secondaryEmail: secondaryEmail.trimmingCharacters(in: .whitespacesAndNewlines),
-            oauthClientFile: paths.oauthClient.lastPathComponent, primaryLabel: primaryLabel
+            oauthClientFile: replace ? "oauth-client-\(scopeID.uuidString).json" : paths.oauthClient.lastPathComponent,
+            primaryLabel: primaryLabel, scopeID: scopeID
         )
         try configuration.validate()
 
@@ -35,10 +40,13 @@ struct Setup: AsyncParsableCommand {
             return OAuth(role: role, email: email, client: client)
         }
 
-        try paths.prepare()
-        try await RolloutState.withSyncLock(path: paths.state.path) {
-            guard !FileManager.default.fileExists(atPath: paths.config.path) else {
-                throw RelayError("A mailbox pair is already configured for this macOS login.")
+        try await paths.withLock {
+            let configured = FileManager.default.fileExists(atPath: paths.config.path)
+            if configured, !replace {
+                throw RelayError("A mailbox pair is already configured for this macOS login. Use readrelay setup --replace to change it, or readrelay set-label to change only the label.")
+            }
+            if !configured, replace {
+                throw RelayError("No mailbox pair is configured. Run readrelay setup first.")
             }
             var tokens: [(OAuth, String)] = []
             for account in oauth {
@@ -50,14 +58,37 @@ struct Setup: AsyncParsableCommand {
                 }
             }
 
-            try clientData.write(to: paths.oauthClient, options: .atomic)
+            try clientData.write(
+                to: configuration.clientFile(for: .primary, relativeTo: paths.config.path), options: .atomic
+            )
             for (account, token) in tokens {
                 try account.storeRefreshToken(token)
             }
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(configuration).write(to: paths.config, options: .atomic)
+            try paths.saveConfiguration(configuration)
         }
         print("Connected both Gmail mailboxes. Run readrelay preview to review the recent backlog.")
+        if replace { print("Verify forwarding again and wait for a successful Homebrew preview before approving writes.") }
+    }
+}
+
+struct SetLabel: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Select a primary Gmail label and start a fresh review."
+    )
+
+    @Argument(help: "Label applied to originals by the primary Gmail forwarding filter.")
+    var label: String
+
+    func run() async throws {
+        let paths = BetaPaths()
+        _ = try paths.loadConfiguration()
+        try await paths.withLock {
+            let current = try paths.loadConfiguration()
+            let next = current.withFreshScope(primaryLabel: label)
+            try next.validate()
+            try paths.saveConfiguration(next)
+        }
+        print("Selected “\(label)” and returned to preview mode.")
+        print("Update the Gmail forwarding filter and verify forwarding before approving writes.")
     }
 }

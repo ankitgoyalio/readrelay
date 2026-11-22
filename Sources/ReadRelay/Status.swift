@@ -7,22 +7,38 @@ struct Status: ParsableCommand {
     func run() throws {
         let paths = BetaPaths()
         let files = FileManager.default
+        var configuration: Configuration?
+        var isLive = false
         var lastSuccess: Date?
-        print("Mode: Preview")
+        var setupMessage: String?
         if !files.fileExists(atPath: paths.config.path) {
-            print("Setup: Run readrelay setup first.")
-        } else if files.fileExists(atPath: paths.state.path) {
+            setupMessage = "Setup: Run readrelay setup first."
+        } else {
             do {
-                let configuration = try paths.loadConfiguration()
-                let rollout = try RolloutState(path: paths.state.path, configuration: configuration)
-                lastSuccess = try rollout.lastHomebrewPreview()
+                let current = try paths.loadConfiguration()
+                configuration = current
+                let state = paths.state(for: current)
+                if files.fileExists(atPath: state.path) {
+                    let rollout = try RolloutState(path: state.path, configuration: current)
+                    let scope = try rollout.betaScope()
+                    isLive = scope?.approvedReviewCode != nil
+                    let dates = [try rollout.lastHomebrewPreview(), scope?.lastLiveRun].compactMap { $0 }
+                    lastSuccess = dates.max()
+                }
             } catch {
-                print("SQLite state: \(error.localizedDescription)")
+                setupMessage = "Saved state: \(error.localizedDescription)"
             }
         }
+        print(isLive ? "Mode: Live" : "Mode: Preview")
+        if let configuration {
+            print("Mailbox pair: \(configuration.primaryEmail) → \(configuration.secondaryEmail)")
+            print("Primary label: \(configuration.primaryLabel)")
+        }
+        if let setupMessage { print(setupMessage) }
         print("Last successful run: \(lastSuccess?.ISO8601Format() ?? "None")")
-        if files.fileExists(atPath: paths.serviceFailure.path) {
-            let data = try Data(contentsOf: paths.serviceFailure)
+        let failureFile = paths.serviceFailure(for: configuration)
+        if files.fileExists(atPath: failureFile.path) {
+            let data = try Data(contentsOf: failureFile)
             let failure = try JSONDecoder().decode(ServiceFailure.self, from: data)
             print("Latest failure: \(failure.date.ISO8601Format()) — \(failure.message)")
         } else {

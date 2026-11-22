@@ -109,17 +109,21 @@ final class RolloutState {
 
     static func withSyncLock<Value>(path: String, run: () async throws -> Value) async throws -> Value {
         let databasePath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-        let descriptor = open(databasePath + ".sync.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        return try await withLock(at: databasePath + ".sync.lock", run: run)
+    }
+
+    static func withLock<Value>(at path: String, run: () async throws -> Value) async throws -> Value {
+        let descriptor = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw RelayError("Could not open the rollout sync lock.") }
         defer { close(descriptor) }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            throw RelayError("Could not acquire the rollout sync lock. Another sync may be running.")
+            throw RelayError("Could not acquire the rollout sync lock. Wait for the current ReadRelay command to finish and retry.")
         }
         return try await run()
     }
 
     // The table is published with the entire first successful report, including an empty backlog.
-    func savePreview(_ report: BacklogReport) throws {
+    func savePreview(_ report: BacklogReport, betaLabelID: String?) throws {
         try transaction {
             guard try !Self.hasTable(Batch.reviewed.rawValue, in: database) else {
                 throw RelayError("Another dry run saved the backlog. Run dry-run again to review it.")
@@ -129,6 +133,82 @@ final class RolloutState {
                 Message(originalID: entry.originalID, copyID: entry.forwardedCopyID,
                         messageID: entry.messageID, completed: false)
             }, into: .reviewed)
+            if let betaLabelID {
+                try Self.execute("""
+                    CREATE TABLE beta_scope (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        label_id TEXT NOT NULL,
+                        review_code TEXT,
+                        report_digest TEXT,
+                        approved_review_code TEXT,
+                        live_succeeded_at REAL
+                    )
+                    """, in: database)
+                try Self.prepare("INSERT INTO beta_scope (singleton, label_id) VALUES (1, ?)", in: database) {
+                    try Self.bind(betaLabelID, to: $0, at: 1)
+                    try Self.finish($0)
+                }
+            }
+        }
+    }
+
+    struct BetaScope {
+        let labelID: String
+        let reviewCode: String?
+        let reportDigest: String?
+        let approvedReviewCode: String?
+        let lastLiveRun: Date?
+    }
+
+    func betaScope() throws -> BetaScope? {
+        guard try Self.hasTable("beta_scope", in: database) else { return nil }
+        return try Self.prepare("""
+            SELECT label_id, review_code, report_digest, approved_review_code, live_succeeded_at
+            FROM beta_scope WHERE singleton = 1
+            """, in: database) { statement in
+            guard sqlite3_step(statement) == SQLITE_ROW, let labelID = Self.columnText(statement, 0) else {
+                throw RelayError("Could not read the saved beta scope.")
+            }
+            let lastLiveRun = sqlite3_column_type(statement, 4) == SQLITE_NULL
+                ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+            return BetaScope(labelID: labelID, reviewCode: Self.columnText(statement, 1),
+                             reportDigest: Self.columnText(statement, 2), approvedReviewCode: Self.columnText(statement, 3),
+                             lastLiveRun: lastLiveRun)
+        }
+    }
+
+    func requireBetaLabel(_ labelID: String) throws {
+        guard try betaScope()?.labelID == labelID else {
+            throw RelayError("The saved backlog is for a different Gmail label ID or has no label ID. Run readrelay set-label with the current label to start a fresh review.")
+        }
+    }
+
+    func recordReview(code: String, digest: String) throws {
+        try Self.prepare("UPDATE beta_scope SET review_code = ?, report_digest = ? WHERE singleton = 1",
+                         in: database) {
+            try Self.bind(code, to: $0, at: 1)
+            try Self.bind(digest, to: $0, at: 2)
+            try Self.finish($0)
+        }
+    }
+
+    func approveReview() throws {
+        try Self.execute("UPDATE beta_scope SET approved_review_code = review_code WHERE singleton = 1", in: database)
+    }
+
+    func revokeReview() throws {
+        try Self.execute("""
+            UPDATE beta_scope SET approved_review_code = NULL, review_code = NULL, report_digest = NULL
+            WHERE singleton = 1
+            """, in: database)
+    }
+
+    func recordLiveRun(at date: Date) throws {
+        try Self.prepare("UPDATE beta_scope SET live_succeeded_at = ? WHERE singleton = 1", in: database) {
+            guard sqlite3_bind_double($0, 1, date.timeIntervalSince1970) == SQLITE_OK else {
+                throw RelayError("Could not save the time of the live run.")
+            }
+            try Self.finish($0)
         }
     }
 

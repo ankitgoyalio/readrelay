@@ -1,7 +1,33 @@
-extension Sync {
-    func applyWork(
+enum SyncEngine {
+    static func run(
+        rollout: RolloutState, originalID: String? = nil, copyID: String? = nil,
+        connect: () async throws -> RelayMailboxes
+    ) async throws -> BacklogReport {
+        guard let backlog = try rollout.messages(in: .reviewed) else {
+            throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+        }
+        let ongoing = try rollout.messages(in: .ongoing)
+        let batch: RolloutState.Batch = ongoing == nil ? .reviewed : .ongoing
+        var work = ongoing ?? backlog
+        if let originalID, let copyID {
+            guard backlog.contains(where: { $0.originalID == originalID && $0.copyID == copyID }),
+                  let pair = work.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
+                throw RelayError("The requested message pair is absent from the previewed backlog.")
+            }
+            work = [pair]
+        }
+        let report = try await applyWork(
+            work, in: batch, discover: batch == .ongoing && originalID == nil, rollout: rollout, connect: connect
+        )
+        if batch == .reviewed, originalID == nil {
+            try rollout.startIncrementalSync()
+        }
+        return report
+    }
+
+    private static func applyWork(
         _ savedWork: [RolloutState.Message], in batch: RolloutState.Batch, discover: Bool,
-        rollout: RolloutState, configuration: Configuration
+        rollout: RolloutState, connect: () async throws -> RelayMailboxes
     ) async throws -> BacklogReport {
         let pending = savedWork.filter { !$0.completed }
         let cutoff = rollout.cutoff
@@ -10,7 +36,7 @@ extension Sync {
             return BacklogReport(cutoffEpochMilliseconds: cutoff, entries: entries)
         }
 
-        let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
+        let mailboxes = try await connect()
         let primary = mailboxes.primary
         let secondary = mailboxes.secondary
         let labelID = mailboxes.readRelayLabelID

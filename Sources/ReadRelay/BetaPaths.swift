@@ -7,11 +7,43 @@ struct BetaPaths {
 
     var config: URL { directory.appendingPathComponent("config.json") }
     var oauthClient: URL { directory.appendingPathComponent("oauth-client.json") }
-    var state: URL { directory.appendingPathComponent("state.sqlite") }
+    func state(for configuration: Configuration) -> URL {
+        scopeFile("state", extension: "sqlite", for: configuration)
+    }
+
+    func scopeFile(_ name: String, extension ext: String, for configuration: Configuration) -> URL {
+        let suffix = configuration.scopeID.map { "-\($0.uuidString)" } ?? ""
+        return directory.appendingPathComponent("\(name)\(suffix).\(ext)")
+    }
+
+    func withLock<Value>(run: () async throws -> Value) async throws -> Value {
+        try prepare()
+        return try await RolloutState.withLock(at: directory.appendingPathComponent("beta.lock").path, run: run)
+    }
+
+    func requireManualPaths(_ paths: String...) throws {
+        let root = directory.resolvingSymlinksInPath().path
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            let resolved = url.resolvingSymlinksInPath().path
+            let parent = url.deletingLastPathComponent().resolvingSymlinksInPath()
+            let resolvedParentPath = parent.appendingPathComponent(url.lastPathComponent).path
+            if [url.standardizedFileURL.path, resolved, resolvedParentPath].contains(where: {
+                $0 == root || $0.hasPrefix(root + "/")
+            }) {
+                throw RelayError("Use readrelay preview, approve, and revoke for the Homebrew setup.")
+            }
+        }
+    }
     var logs: URL { directory.appendingPathComponent("logs", isDirectory: true) }
-    var previewReport: URL { directory.appendingPathComponent("preview.json") }
+    func previewReport(for configuration: Configuration) -> URL {
+        scopeFile("preview", extension: "json", for: configuration)
+    }
     var serviceLog: URL { logs.appendingPathComponent("service.log") }
-    var serviceFailure: URL { logs.appendingPathComponent("latest-failure.json") }
+    func serviceFailure(for configuration: Configuration?) -> URL {
+        let suffix = configuration?.scopeID.map { "-\($0.uuidString)" } ?? ""
+        return logs.appendingPathComponent("latest-failure\(suffix).json")
+    }
 
     func prepare() throws {
         umask(0o077)
@@ -24,6 +56,17 @@ struct BetaPaths {
             throw RelayError("No mailbox pair is configured. Run readrelay setup first.")
         }
         return try Configuration.load(path: config.path)
+    }
+
+    func connect(configuration: Configuration, unattended: Bool) async throws -> RelayMailboxes {
+        try await RelayMailboxes(configuration: configuration, configPath: config.path,
+                                 unattended: unattended, homebrew: true)
+    }
+
+    func saveConfiguration(_ configuration: Configuration) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(configuration).write(to: config, options: .atomic)
     }
 
     private func createPrivateDirectory(_ url: URL) throws {

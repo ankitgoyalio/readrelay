@@ -183,7 +183,7 @@ private struct RefreshTokenKeychain {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound {
-            throw RelayError("The \(role.rawValue) mailbox refresh token is missing from Keychain. Run readrelay authorize \(role.rawValue) with your configuration.")
+            throw RelayError("The \(role.rawValue) mailbox refresh token is missing from Keychain.")
         }
         if status == errSecInteractionNotAllowed {
             throw RelayError("Keychain access requires interaction for the \(role.rawValue) mailbox. Unlock your login Keychain and run an interactive preview to allow this ReadRelay executable to access the refresh token.")

@@ -12,28 +12,39 @@ struct ServiceRun: AsyncParsableCommand {
         try HomebrewJob.verifyCurrentProcess()
 
         let paths = BetaPaths()
-        try paths.prepare()
-        do {
-            try await RolloutState.withSyncLock(path: paths.state.path) {
+        try await paths.withLock {
+            var activeConfiguration: Configuration?
+            do {
                 let configuration = try paths.loadConfiguration()
-                let mailboxes = try await RelayMailboxes(
-                    configuration: configuration, configPath: paths.config.path, unattended: true
-                )
+                activeConfiguration = configuration
+                let mailboxes = try await paths.connect(configuration: configuration, unattended: true)
                 let rollout = try RolloutState(
-                    path: paths.state.path, configuration: configuration, previewStartedAt: startedAt
+                    path: paths.state(for: configuration).path, configuration: configuration, previewStartedAt: startedAt
                 )
 
-                // Choose the service mode here under the state lock when live approval is available.
-                _ = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout)
-                let date = Date()
-                try Self.log("Preview succeeded", at: date, to: paths.serviceLog)
-                try rollout.recordHomebrewPreview(at: date)
+                if try rollout.betaScope()?.approvedReviewCode != nil {
+                    try rollout.requireBetaLabel(mailboxes.readRelayLabelID)
+                    guard try rollout.lastHomebrewPreview() != nil,
+                          try paths.hasForwardingProof(for: configuration, labelID: mailboxes.readRelayLabelID) else {
+                        throw RelayError("The saved scope needs a successful Homebrew preview and forwarding verification. Run readrelay revoke, then verify forwarding and review a new preview.")
+                    }
+                    _ = try await SyncEngine.run(rollout: rollout) { mailboxes }
+                    let date = Date()
+                    try rollout.recordLiveRun(at: date)
+                    try Self.log("Live sync succeeded", at: date, to: paths.serviceLog)
+                } else {
+                    _ = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout, beta: true)
+                    let date = Date()
+                    try rollout.recordHomebrewPreview(at: date)
+                    try Self.log("Preview succeeded", at: date, to: paths.serviceLog)
+                }
+            } catch {
+                let failure = ServiceFailure(date: Date(), message: error.localizedDescription)
+                try JSONEncoder().encode(failure)
+                    .write(to: paths.serviceFailure(for: activeConfiguration), options: .atomic)
+                try Self.log(failure.message, at: failure.date, to: paths.serviceLog)
+                throw error
             }
-        } catch {
-            let failure = ServiceFailure(date: Date(), message: error.localizedDescription)
-            try JSONEncoder().encode(failure).write(to: paths.serviceFailure, options: .atomic)
-            try Self.log(failure.message, at: failure.date, to: paths.serviceLog)
-            throw error
         }
     }
 

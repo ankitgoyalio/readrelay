@@ -14,37 +14,41 @@ struct Preview: AsyncParsableCommand {
         let startedAt = Date()
         let paths = BetaPaths()
         _ = try paths.loadConfiguration()
-        try paths.prepare()
-        try await RolloutState.withSyncLock(path: paths.state.path) {
+        try await paths.withLock {
             let configuration = try paths.loadConfiguration()
-            let mailboxes = try await RelayMailboxes(
-                configuration: configuration, configPath: paths.config.path, unattended: unattended
-            )
+            let mailboxes = try await paths.connect(configuration: configuration, unattended: unattended)
             let rollout = try RolloutState(
-                path: paths.state.path, configuration: configuration, previewStartedAt: startedAt
+                path: paths.state(for: configuration).path, configuration: configuration, previewStartedAt: startedAt
             )
-            let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout)
+            let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout, beta: true)
             let output = try report.json() + "\n"
-            try Data(output.utf8).write(to: paths.previewReport, options: .atomic)
+            let data = Data(output.utf8)
+            let reportFile = paths.previewReport(for: configuration)
+            try data.write(to: reportFile, options: .atomic)
             if json {
                 print(output, terminator: "")
             } else {
-                print(report.summary(label: configuration.primaryLabel))
-                print("JSON report saved to \(paths.previewReport.path)")
+                let code = UUID().uuidString
+                try rollout.recordReview(code: code, digest: reviewDigest(data))
+                print("Mailbox pair: \(configuration.primaryEmail) → \(configuration.secondaryEmail)")
+                print("Primary label: \(configuration.primaryLabel)")
+                print(report.summary())
+                print("JSON report saved to \(reportFile.path)")
+                print("To approve this backlog and future eligible messages in this scope, run:")
+                print("  readrelay approve \(code)")
             }
         }
     }
 }
 
 extension BacklogReport {
-    func summary(label: String) -> String {
+    func summary() -> String {
         guard !entries.isEmpty else {
-            return "No labeled originals in the initial 120-hour window. There is nothing to review."
+            return "No labeled originals in the saved five-day backlog."
         }
         let outcomes = Dictionary(grouping: entries, by: \.outcome).mapValues(\.count)
         let proposed = outcomes[.wouldMarkRead, default: 0]
         var lines = [
-            "Preview for “\(label)”",
             "Originals reviewed: \(entries.count)",
             "Forwarded copies that would be marked read: \(proposed)",
             "Originals skipped: \(entries.count - proposed)"

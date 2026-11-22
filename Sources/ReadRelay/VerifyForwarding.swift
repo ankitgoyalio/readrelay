@@ -15,12 +15,9 @@ struct VerifyForwarding: AsyncParsableCommand {
         }
         let paths = BetaPaths()
         _ = try paths.loadConfiguration()
-        try paths.prepare()
-        try await RolloutState.withSyncLock(path: paths.state.path) {
+        try await paths.withLock {
             let configuration = try paths.loadConfiguration()
-            let mailboxes = try await RelayMailboxes(
-                configuration: configuration, configPath: paths.config.path, unattended: false
-            )
+            let mailboxes = try await paths.connect(configuration: configuration, unattended: false)
             let labelID = mailboxes.readRelayLabelID
             let originals = try await mailboxes.primary.messages(labelID: labelID)
                 .filter { $0.labelIds?.contains(labelID) == true }
@@ -70,10 +67,9 @@ private struct ForwardingProof: Codable, Equatable {
 }
 
 extension BetaPaths {
-    private var forwardingProof: URL { directory.appendingPathComponent("forwarding-proof.json") }
-
     /// Call with the current Gmail label ID while holding the beta state lock.
     func hasForwardingProof(for configuration: Configuration, labelID: String) throws -> Bool {
+        let forwardingProof = scopeFile("forwarding-proof", extension: "json", for: configuration)
         let data: Data
         do {
             data = try Data(contentsOf: forwardingProof)
@@ -89,6 +85,7 @@ extension BetaPaths {
     }
 
     fileprivate func saveForwardingProof(for configuration: Configuration, labelID: String) throws {
+        let forwardingProof = scopeFile("forwarding-proof", extension: "json", for: configuration)
         let proof = ForwardingProof(configuration: configuration, labelID: labelID)
         do {
             try JSONEncoder().encode(proof).write(to: forwardingProof, options: .atomic)

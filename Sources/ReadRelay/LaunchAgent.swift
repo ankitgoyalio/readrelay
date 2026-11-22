@@ -25,6 +25,7 @@ struct LaunchAgent: ParsableCommand {
         guard [executable, config, state, logDirectory].allSatisfy({ $0.hasPrefix("/") }) else {
             throw RelayError("The executable, config, state, and log directory must use absolute paths.")
         }
+        try BetaPaths().requireManualPaths(config, state)
         let command = enableScheduledWrites ? ["sync", "--apply"] : ["dry-run"]
         let arguments = [executable] + command + ["--unattended", "--config", config, "--state", state]
         let logs = URL(fileURLWithPath: logDirectory, isDirectory: true)

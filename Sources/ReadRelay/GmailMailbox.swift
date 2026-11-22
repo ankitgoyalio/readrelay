@@ -5,13 +5,22 @@ struct RelayMailboxes {
     let secondary: GmailMailbox
     let readRelayLabelID: String
 
-    init(configuration: Configuration, configPath: String, unattended: Bool) async throws {
+    init(configuration: Configuration, configPath: String, unattended: Bool, homebrew: Bool = false) async throws {
         let primaryOAuth = try OAuth(role: .primary, configuration: configuration, configPath: configPath)
         let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: configPath)
         if unattended { try OAuth.preventKeychainPrompts() }
-        primary = try await primaryOAuth.mailbox()
+        func connect(_ oauth: OAuth) async throws -> GmailMailbox {
+            do {
+                return try await oauth.mailbox()
+            } catch {
+                let command = homebrew ? "readrelay authorize \(oauth.role.rawValue)"
+                    : "readrelay authorize \(oauth.role.rawValue) --config <path>"
+                throw RelayError("\(error.localizedDescription) To reconnect this mailbox, run \(command).")
+            }
+        }
+        primary = try await connect(primaryOAuth)
         readRelayLabelID = try await primary.labelID(named: configuration.primaryLabel)
-        secondary = try await secondaryOAuth.mailbox()
+        secondary = try await connect(secondaryOAuth)
     }
 }
 

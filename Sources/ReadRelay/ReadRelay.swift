@@ -8,7 +8,7 @@ struct ReadRelay: AsyncParsableCommand {
         abstract: "Preview and sync read status for forwarded Gmail messages.",
         version: "0.1.0",
         subcommands: [
-            Setup.self, VerifyForwarding.self, Preview.self, Status.self,
+            Setup.self, SetLabel.self, VerifyForwarding.self, Preview.self, Approve.self, Revoke.self, Status.self,
             Authorize.self, DryRun.self, Sync.self, LaunchAgent.self, ServiceRun.self
         ]
     )
@@ -40,22 +40,37 @@ struct Configuration: Codable {
     let primaryOAuthClientFile: String
     let secondaryOAuthClientFile: String
     let enableWrites: Bool?
+    let scopeID: UUID?
     private let configuredPrimaryLabel: String?
 
     var primaryLabel: String { configuredPrimaryLabel ?? Self.defaultPrimaryLabel }
 
     enum CodingKeys: String, CodingKey {
-        case primaryEmail, secondaryEmail, primaryOAuthClientFile, secondaryOAuthClientFile, enableWrites
+        case primaryEmail, secondaryEmail, primaryOAuthClientFile, secondaryOAuthClientFile, enableWrites, scopeID
         case configuredPrimaryLabel = "primaryLabel"
     }
 
-    init(primaryEmail: String, secondaryEmail: String, oauthClientFile: String, primaryLabel: String) {
+    init(primaryEmail: String, secondaryEmail: String, oauthClientFile: String, primaryLabel: String,
+         scopeID: UUID) {
+        self.init(primaryEmail: primaryEmail, secondaryEmail: secondaryEmail,
+                  primaryOAuthClientFile: oauthClientFile, secondaryOAuthClientFile: oauthClientFile,
+                  primaryLabel: primaryLabel, scopeID: scopeID)
+    }
+
+    private init(primaryEmail: String, secondaryEmail: String, primaryOAuthClientFile: String,
+                 secondaryOAuthClientFile: String, primaryLabel: String, scopeID: UUID) {
         self.primaryEmail = primaryEmail
         self.secondaryEmail = secondaryEmail
-        primaryOAuthClientFile = oauthClientFile
-        secondaryOAuthClientFile = oauthClientFile
+        self.primaryOAuthClientFile = primaryOAuthClientFile
+        self.secondaryOAuthClientFile = secondaryOAuthClientFile
         enableWrites = nil
+        self.scopeID = scopeID
         configuredPrimaryLabel = primaryLabel
+    }
+
+    func withFreshScope(primaryLabel: String) -> Self {
+        Self(primaryEmail: primaryEmail, secondaryEmail: secondaryEmail, primaryOAuthClientFile: primaryOAuthClientFile,
+             secondaryOAuthClientFile: secondaryOAuthClientFile, primaryLabel: primaryLabel, scopeID: UUID())
     }
 
     static func load(path: String) throws -> Self {
@@ -98,16 +113,27 @@ struct Authorize: AsyncParsableCommand {
     @Argument(help: "Mailbox role.")
     var role: MailboxRole
 
-    @Option(help: "Path to the ReadRelay configuration JSON.")
-    var config: String
+    @Option(help: "Path to a manual ReadRelay configuration JSON. Omit for the Homebrew setup.")
+    var config: String?
 
     @Flag(help: "Import an existing refresh token JSON from standard input.")
     var importToken = false
 
     func run() async throws {
-        let configuration = try Configuration.load(path: config)
-        let oauth = try OAuth(role: role, configuration: configuration, configPath: config)
-        try await oauth.authorize(importToken: importToken)
+        let paths = BetaPaths()
+        if let config {
+            try paths.requireManualPaths(config)
+            let configuration = try Configuration.load(path: config)
+            let oauth = try OAuth(role: role, configuration: configuration, configPath: config)
+            try await oauth.authorize(importToken: importToken)
+        } else {
+            _ = try paths.loadConfiguration()
+            try await paths.withLock {
+                let configuration = try paths.loadConfiguration()
+                let oauth = try OAuth(role: role, configuration: configuration, configPath: paths.config.path)
+                try await oauth.authorize(importToken: importToken)
+            }
+        }
         print("Authorized the \(role.rawValue) Gmail mailbox.")
     }
 }
@@ -126,6 +152,7 @@ struct DryRun: AsyncParsableCommand {
 
     func run() async throws {
         let startedAt = Date()
+        try BetaPaths().requireManualPaths(config, state)
         let configuration = try Configuration.load(path: config)
         let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
         let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
@@ -157,6 +184,7 @@ struct Sync: AsyncParsableCommand {
 
     func run() async throws {
         guard apply else { throw RelayError("Pass --apply after reviewing the dry run.") }
+        try BetaPaths().requireManualPaths(config, state)
         let configuration = try Configuration.load(path: config)
         guard configuration.enableWrites == true else {
             throw RelayError("Set enableWrites to true in the configuration after reviewing the dry run.")
@@ -164,30 +192,15 @@ struct Sync: AsyncParsableCommand {
         guard (originalID == nil) == (copyID == nil) else {
             throw RelayError("Pass --original-id and --copy-id together to limit the sync to one reviewed pair.")
         }
-        let rollout = try RolloutState(path: state, configuration: configuration)
         try await RolloutState.withSyncLock(path: state) {
-            guard let backlog = try rollout.messages(in: .reviewed) else {
-                throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+            let rollout = try RolloutState(path: state, configuration: configuration)
+            guard try rollout.betaScope() == nil else {
+                throw RelayError("Use readrelay preview, approve, and revoke for the Homebrew setup.")
             }
-            let ongoing = try rollout.messages(in: .ongoing)
-            let batch: RolloutState.Batch = ongoing == nil ? .reviewed : .ongoing
-            var work = ongoing ?? backlog
-            if let originalID, let copyID {
-                guard backlog.contains(where: { $0.originalID == originalID && $0.copyID == copyID }),
-                      let pair = work.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
-                    throw RelayError("The requested message pair is absent from the previewed backlog.")
-                }
-                work = [pair]
+            let report = try await SyncEngine.run(rollout: rollout, originalID: originalID, copyID: copyID) {
+                try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
             }
-            let report = try await applyWork(
-                work, in: batch, discover: batch == .ongoing && originalID == nil,
-                rollout: rollout, configuration: configuration
-            )
-            let output = try report.json()
-            if batch == .reviewed, originalID == nil {
-                try rollout.startIncrementalSync()
-            }
-            print(output)
+            print(try report.json())
         }
     }
 }

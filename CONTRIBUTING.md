@@ -80,6 +80,16 @@ See the [development launchd runbook](docs/launchd.md) for the manually managed 
 
 ## Seeded Gmail check
 
+### Verify Homebrew approval and revoke
+
+Use dedicated Gmail test mailboxes and the installed Homebrew build from a test macOS login. Stage a labeled read original with one unread forwarded copy, another labeled original that stays unread, and originals with missing or ambiguous matches. Verify forwarding with a known unique pair. Start the Homebrew service and wait for a successful preview. Check that the copies are still unread.
+
+1. Run `readrelay preview` twice and try the first review code. Confirm that it is rejected. Review the current report and approve with the latest code.
+2. After the next Homebrew run, confirm that only the unique copy of the read original changed to read. Confirm that the unread control, missing matches, and ambiguous matches were skipped.
+3. Stage a newly forwarded pair. Stop and start the service, then read the original that was pending. Confirm that both the new eligible mail and the formerly unread original are handled. Repeat with a disconnected grant and reconnect the same mailbox using `readrelay authorize`. Check that status identifies the affected mailbox and that live sync resumes.
+4. Revoke approval while the job is still registered. After revoke succeeds, stage a new read original with an unread copy. Wait for another successful scheduled run and confirm that status shows **Preview** and the copy stays unread.
+5. Change the primary label, or delete and recreate it with the same name. Confirm that the previous approval leaves the new label’s copies untouched. Run `readrelay set-label` with the new label name, verify forwarding, and repeat the approval flow to exercise the fresh scope.
+
 ### Verify a known forwarding pair
 
 Follow the [Gmail forwarding guide](README.md#set-up-and-verify-gmail-forwarding) with dedicated test mailboxes. The opt-in executable tests copy `config.json` and `oauth-client.json` from a directory created by `readrelay setup` and use the corresponding Keychain grants. Each test creates a fresh local preview in a temporary directory.
