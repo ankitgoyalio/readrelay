@@ -108,41 +108,30 @@ struct Configuration: Codable {
 }
 
 struct Authorize: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Store a Gmail refresh token in Keychain.")
+    static let configuration = CommandConfiguration(abstract: "Store a Gmail refresh token for a manual configuration.")
 
     @Argument(help: "Mailbox role.")
     var role: MailboxRole
 
-    @Option(help: "Path to a manual ReadRelay configuration JSON. Omit for the Homebrew setup.")
-    var config: String?
+    @Option(help: "Path to a manual ReadRelay configuration JSON.")
+    var config: String
 
     @Flag(help: "Import an existing refresh token JSON from standard input.")
     var importToken = false
 
     func run() async throws {
         let paths = BetaPaths()
-        if let config {
-            try paths.requireManualPaths(config)
-            let configuration = try Configuration.load(path: config)
-            let oauth = try OAuth(role: role, configuration: configuration, configPath: config)
-            let token = try await oauth.verifiedRefreshToken(importToken: importToken)
-            if FileManager.default.fileExists(atPath: paths.config.path) {
-                try await paths.withLock {
-                    try paths.recordGrantReplacementIfShared(with: [oauth])
-                    try oauth.storeRefreshToken(token)
-                }
-            } else {
+        try paths.requireManualPaths(config)
+        let configuration = try Configuration.load(path: config)
+        let oauth = try OAuth(role: role, configuration: configuration, configPath: config)
+        let token = try await oauth.verifiedRefreshToken(importToken: importToken)
+        if FileManager.default.fileExists(atPath: paths.config.path) {
+            try await paths.withLock {
+                try paths.recordGrantReplacementIfShared(with: [oauth])
                 try oauth.storeRefreshToken(token)
             }
         } else {
-            _ = try paths.loadConfiguration()
-            try await paths.withLock {
-                let configuration = try paths.loadConfiguration()
-                let oauth = try OAuth(role: role, configuration: configuration, configPath: paths.config.path)
-                let token = try await oauth.verifiedRefreshToken(importToken: importToken)
-                try paths.recordGrantReplacement(for: configuration)
-                try oauth.storeRefreshToken(token)
-            }
+            try oauth.storeRefreshToken(token)
         }
         print("Authorized the \(role.rawValue) Gmail mailbox.")
     }

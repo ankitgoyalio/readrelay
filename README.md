@@ -4,7 +4,7 @@ One-way read-status sync for forwarded Gmail messages.
 
 ## Install the macOS beta
 
-After the planned `v0.1.0` prerelease is published, install on an Apple silicon Mac with [Homebrew](https://brew.sh/). The formula downloads a prebuilt executable from GitHub Releases. ReadRelay itself requires no Swift toolchain to install or run.
+Install the beta on an Apple silicon Mac with [Homebrew](https://brew.sh/). The formula downloads a prebuilt executable from GitHub Releases. ReadRelay itself requires no Swift toolchain to install or run.
 
 ```fish
 brew install ankitgoyalio/readrelay/readrelay
