@@ -143,6 +143,45 @@ final class RolloutState {
         }
     }
 
+    // Call under the beta state lock after a verified Homebrew job previews both mailboxes.
+    func recordHomebrewPreview(at date: Date) throws {
+        try transaction {
+            guard try Self.hasTable(Batch.reviewed.rawValue, in: database) else {
+                throw RelayError("A successful Homebrew preview requires a saved backlog.")
+            }
+            try Self.execute("""
+                CREATE TABLE IF NOT EXISTS homebrew_preview (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    succeeded_at REAL NOT NULL
+                )
+                """, in: database)
+            try Self.prepare("""
+                INSERT INTO homebrew_preview (singleton, succeeded_at) VALUES (1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET succeeded_at = excluded.succeeded_at
+                """, in: database) { statement in
+                guard sqlite3_bind_double(statement, 1, date.timeIntervalSince1970) == SQLITE_OK else {
+                    throw RelayError("Could not save the time of the Homebrew preview.")
+                }
+                try Self.finish(statement)
+            }
+        }
+    }
+
+    // The database scope is validated on open. Evidence belongs to its saved backlog.
+    func lastHomebrewPreview() throws -> Date? {
+        guard try Self.hasTable(Batch.reviewed.rawValue, in: database),
+              try Self.hasTable("homebrew_preview", in: database) else { return nil }
+        return try Self.prepare("SELECT succeeded_at FROM homebrew_preview WHERE singleton = 1", in: database) {
+            statement in
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return nil }
+            guard status == SQLITE_ROW, sqlite3_column_type(statement, 0) == SQLITE_FLOAT else {
+                throw RelayError("Could not read the last successful Homebrew preview.")
+            }
+            return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
+        }
+    }
+
     func saveDiscovered(_ messages: [Message]) throws {
         guard !messages.isEmpty else { return }
         try transaction {

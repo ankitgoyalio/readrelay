@@ -54,6 +54,35 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(result.output.isEmpty)
     }
 
+    func testStatusShowsPreviewModeBeforeTheServiceHasRun() throws {
+        let home = try temporaryDirectory()
+        let result = try runCLI(["status"], home: home)
+
+        XCTAssertEqual(result.status, 0, result.error)
+        let output = String(decoding: result.output, as: UTF8.self)
+        XCTAssertTrue(output.contains("Mode: Preview"), output)
+        XCTAssertTrue(output.contains("Last successful run: None"), output)
+        XCTAssertTrue(output.contains("Latest failure: None"), output)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: home.appendingPathComponent("Library/Application Support/ReadRelay").path
+        ))
+    }
+
+    func testServiceCommandRejectsManualInvocationBeforeTouchingBetaState() throws {
+        let home = try temporaryDirectory()
+        let run = try runCLI(["service-run"], home: home)
+
+        XCTAssertNotEqual(run.status, 0)
+        XCTAssertTrue(run.error.contains("brew services start ankitgoyalio/readrelay/readrelay"), run.error)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: home.appendingPathComponent("Library/Application Support/ReadRelay").path
+        ))
+        let status = try runCLI(["status"], home: home)
+        let output = String(decoding: status.output, as: UTF8.self)
+        XCTAssertTrue(output.contains("Last successful run: None"), output)
+        XCTAssertTrue(output.contains("Latest failure: None"), output)
+    }
+
     func testSetupDoesNotReplaceTheConfiguredMailboxPair() throws {
         let home = try temporaryDirectory()
         let directory = home.appendingPathComponent("Library/Application Support/ReadRelay")

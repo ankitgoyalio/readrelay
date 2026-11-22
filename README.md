@@ -33,6 +33,23 @@ brew uninstall ankitgoyalio/readrelay/readrelay
 
 Uninstalling removes the executable. Your per-user configuration, SQLite sync state, logs, OAuth client file, and Keychain entries stay on your Mac. To remove your local setup entirely, remove the ReadRelay files for your login and delete its `io.ankitgoyal.readrelay.oauth` entries in Keychain Access. Deleting SQLite state also discards pending sync work. To revoke ReadRelay’s Gmail access, remove the OAuth grant in each Google Account.
 
+## Run unattended previews
+
+After connecting both mailboxes, start the background service from your macOS login. Use Homebrew without `sudo`.
+
+```fish
+brew services start ankitgoyalio/readrelay/readrelay
+readrelay status
+```
+
+ReadRelay runs a preview when the service loads, including when you log back in, and every 15 minutes while your Mac is awake and you’re logged in. An interval can be skipped while your Mac is asleep or a run is still active. After wake, ReadRelay picks up on a subsequent interval. Previews leave Gmail read status unchanged.
+
+`readrelay status` shows the mode, when the background job last completed successfully, and the most recent failure. Homebrew reports whether the job is registered with `brew services list`. ReadRelay keeps the latest run log in `~/Library/Application Support/ReadRelay/logs/service.log`.
+
+If status reports that Keychain access requires interaction, unlock your login Keychain and run `readrelay preview` in Terminal using the installed executable. If prompted, choose **Always Allow** for the refresh token. Then run `brew services restart ankitgoyalio/readrelay/readrelay` and check for a new successful run in `readrelay status`.
+
+Pause background previews with `brew services stop ankitgoyalio/readrelay/readrelay`. Starting it again uses your saved configuration and SQLite state.
+
 ## Contribute
 
 See [Contributing](CONTRIBUTING.md) for source builds, offline tests, and opt-in Gmail checks.

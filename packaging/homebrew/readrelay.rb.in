@@ -14,6 +14,14 @@ class Readrelay < Formula
     prefix.install "LICENSE", "LICENSE.swift-argument-parser"
   end
 
+  service do
+    name macos: "homebrew.mxcl.readrelay"
+    run [opt_bin/"readrelay", "service-run"]
+    run_at_load true
+    run_type :interval
+    interval 900
+  end
+
   test do
     assert_equal version.to_s, shell_output("#{bin}/readrelay --version").strip
   end

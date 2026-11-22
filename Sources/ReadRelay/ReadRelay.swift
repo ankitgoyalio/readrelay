@@ -7,7 +7,10 @@ struct ReadRelay: AsyncParsableCommand {
         commandName: "readrelay",
         abstract: "Preview and sync read status for forwarded Gmail messages.",
         version: "0.1.0",
-        subcommands: [Setup.self, Preview.self, Authorize.self, DryRun.self, Sync.self, LaunchAgent.self]
+        subcommands: [
+            Setup.self, Preview.self, Status.self, Authorize.self, DryRun.self,
+            Sync.self, LaunchAgent.self, ServiceRun.self
+        ]
     )
 }
 

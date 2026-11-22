@@ -105,7 +105,7 @@ struct OAuth {
     }
 
     func mailbox() async throws -> GmailMailbox {
-        let refreshToken = try RefreshTokenKeychain().load(account: keychainAccount)
+        let refreshToken = try RefreshTokenKeychain().load(account: keychainAccount, role: role)
         return try await verifiedMailbox(refreshToken: refreshToken)
     }
 
@@ -176,21 +176,21 @@ private struct RefreshTokenKeychain {
         ]
     }
 
-    func load(account: String) throws -> String {
+    func load(account: String, role: MailboxRole) throws -> String {
         var request = query(account: account)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound {
-            throw RelayError("A refresh token is missing from Keychain. Run readrelay authorize for that mailbox.")
+            throw RelayError("The \(role.rawValue) mailbox refresh token is missing from Keychain. Run readrelay authorize \(role.rawValue) with your configuration.")
         }
         if status == errSecInteractionNotAllowed {
-            throw RelayError("Keychain access requires interaction. Unlock the login Keychain and allow this ReadRelay executable to access the refresh token.")
+            throw RelayError("Keychain access requires interaction for the \(role.rawValue) mailbox. Unlock your login Keychain and run an interactive preview to allow this ReadRelay executable to access the refresh token.")
         }
         guard status == errSecSuccess, let data = result as? Data,
               let value = String(data: data, encoding: .utf8), !value.isEmpty else {
-            throw RelayError("Could not read the refresh token from Keychain (status \(status)).")
+            throw RelayError("Could not read the \(role.rawValue) mailbox refresh token from Keychain (status \(status)).")
         }
         return value
     }

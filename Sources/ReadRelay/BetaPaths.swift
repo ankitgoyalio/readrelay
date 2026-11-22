@@ -10,6 +10,8 @@ struct BetaPaths {
     var state: URL { directory.appendingPathComponent("state.sqlite") }
     var logs: URL { directory.appendingPathComponent("logs", isDirectory: true) }
     var previewReport: URL { directory.appendingPathComponent("preview.json") }
+    var serviceLog: URL { logs.appendingPathComponent("service.log") }
+    var serviceFailure: URL { logs.appendingPathComponent("latest-failure.json") }
 
     func prepare() throws {
         umask(0o077)
