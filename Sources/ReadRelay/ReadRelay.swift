@@ -6,6 +6,7 @@ struct ReadRelay: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "readrelay",
         abstract: "Preview and sync read status for forwarded Gmail messages.",
+        version: "0.1.0",
         subcommands: [Authorize.self, DryRun.self, Sync.self, LaunchAgent.self]
     )
 }

@@ -3,6 +3,15 @@ import SQLite3
 import XCTest
 
 final class CLITests: XCTestCase {
+    func testVersionPrintsOnlyTheReleaseVersionWithoutConfiguration() throws {
+        let result = try runCLI(["--version"])
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.error, "")
+        let output = String(decoding: result.output, as: UTF8.self)
+        XCTAssertNotNil(output.wholeMatch(of: /[0-9]+\.[0-9]+\.[0-9]+\n/))
+    }
+
     func testLaunchAgentSchedulesOnlyUnattendedPreviewsByDefault() throws {
         let executable = "/Users/owner/Library/Application Support/ReadRelay & Dot/readrelay"
         let config = "/Users/owner/Library/Application Support/ReadRelay & Dot/config.json"
