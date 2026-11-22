@@ -73,6 +73,18 @@ struct BacklogReport: Encodable {
         return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds, entries: checked)
     }
 
+    static func preview(mailboxes: RelayMailboxes, rollout: RolloutState) async throws -> Self {
+        let backlog = try rollout.messages(in: .reviewed)
+        let report = try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary,
+            labelID: mailboxes.readRelayLabelID, cutoff: rollout.cutoff,
+            originalIDs: backlog.map { Set($0.map(\.originalID)) }
+        )
+        if let backlog { return report.rechecking(backlog) }
+        try rollout.savePreview(report)
+        return report
+    }
+
     static func scan(
         primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64,
         originalIDs: Set<String>? = nil, excludingOriginalIDs: Set<String> = []

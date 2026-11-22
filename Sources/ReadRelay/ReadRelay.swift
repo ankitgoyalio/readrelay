@@ -7,7 +7,7 @@ struct ReadRelay: AsyncParsableCommand {
         commandName: "readrelay",
         abstract: "Preview and sync read status for forwarded Gmail messages.",
         version: "0.1.0",
-        subcommands: [Authorize.self, DryRun.self, Sync.self, LaunchAgent.self]
+        subcommands: [Setup.self, Preview.self, Authorize.self, DryRun.self, Sync.self, LaunchAgent.self]
     )
 }
 
@@ -29,12 +29,31 @@ struct RelayError: LocalizedError {
     var errorDescription: String? { description }
 }
 
-struct Configuration: Decodable {
+struct Configuration: Codable {
+    static let defaultPrimaryLabel = "ReadRelay"
+
     let primaryEmail: String
     let secondaryEmail: String
     let primaryOAuthClientFile: String
     let secondaryOAuthClientFile: String
     let enableWrites: Bool?
+    private let configuredPrimaryLabel: String?
+
+    var primaryLabel: String { configuredPrimaryLabel ?? Self.defaultPrimaryLabel }
+
+    enum CodingKeys: String, CodingKey {
+        case primaryEmail, secondaryEmail, primaryOAuthClientFile, secondaryOAuthClientFile, enableWrites
+        case configuredPrimaryLabel = "primaryLabel"
+    }
+
+    init(primaryEmail: String, secondaryEmail: String, oauthClientFile: String, primaryLabel: String) {
+        self.primaryEmail = primaryEmail
+        self.secondaryEmail = secondaryEmail
+        primaryOAuthClientFile = oauthClientFile
+        secondaryOAuthClientFile = oauthClientFile
+        enableWrites = nil
+        configuredPrimaryLabel = primaryLabel
+    }
 
     static func load(path: String) throws -> Self {
         let config: Self
@@ -43,11 +62,19 @@ struct Configuration: Decodable {
         } catch {
             throw RelayError("Could not read the ReadRelay configuration JSON.")
         }
-        guard !config.primaryEmail.isEmpty, !config.secondaryEmail.isEmpty,
-              config.primaryEmail.caseInsensitiveCompare(config.secondaryEmail) != .orderedSame else {
+        try config.validate()
+        return config
+    }
+
+    func validate() throws {
+        guard !primaryEmail.isEmpty, !secondaryEmail.isEmpty,
+              primaryEmail.caseInsensitiveCompare(secondaryEmail) != .orderedSame else {
             throw RelayError("Configure two distinct Gmail mailboxes.")
         }
-        return config
+        guard !primaryLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              primaryLabel.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw RelayError("Provide a nonempty primary Gmail label name without control characters.")
+        }
     }
 
     func email(for role: MailboxRole) -> String {
@@ -99,15 +126,8 @@ struct DryRun: AsyncParsableCommand {
         let configuration = try Configuration.load(path: config)
         let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
         let rollout = try RolloutState(path: state, configuration: configuration, previewStartedAt: startedAt)
-        let backlog = try rollout.messages(in: .reviewed)
-        let report = try await BacklogReport.scan(
-            primary: mailboxes.primary, secondary: mailboxes.secondary,
-            labelID: mailboxes.readRelayLabelID, cutoff: rollout.cutoff,
-            originalIDs: backlog.map { Set($0.map(\.originalID)) }
-        )
-        let output = try (backlog.map { report.rechecking($0) } ?? report).json()
-        if backlog == nil { try rollout.savePreview(report) }
-        print(output)
+        let report = try await BacklogReport.preview(mailboxes: mailboxes, rollout: rollout)
+        print(try report.json())
     }
 }
 

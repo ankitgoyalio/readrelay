@@ -10,7 +10,7 @@ struct RelayMailboxes {
         let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: configPath)
         if unattended { try OAuth.preventKeychainPrompts() }
         primary = try await primaryOAuth.mailbox()
-        readRelayLabelID = try await primary.readRelayLabelID()
+        readRelayLabelID = try await primary.labelID(named: configuration.primaryLabel)
         secondary = try await secondaryOAuth.mailbox()
     }
 }
@@ -27,7 +27,7 @@ struct GmailMailbox: Sendable {
         }
     }
 
-    func readRelayLabelID() async throws -> String {
+    func labelID(named name: String) async throws -> String {
         struct Labels: Decodable {
             struct Label: Decodable {
                 let name: String
@@ -37,8 +37,8 @@ struct GmailMailbox: Sendable {
         }
 
         let result: Labels = try await get("labels", query: [URLQueryItem(name: "fields", value: "labels(id,name)")])
-        guard let label = result.labels.first(where: { $0.name == "ReadRelay" }) else {
-            throw RelayError("The primary mailbox does not have a ReadRelay label.")
+        guard let label = result.labels.first(where: { $0.name == name }) else {
+            throw RelayError("The primary mailbox does not have the label “\(name)”. Create it in Gmail, add it to the forwarding filter, and run the preview again.")
         }
         return label.id
     }

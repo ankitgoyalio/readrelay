@@ -11,13 +11,19 @@ struct ClientCredentials: Decodable {
     }
 
     static func load(_ url: URL, expectedEmail: String) throws -> Self {
+        guard let data = try? Data(contentsOf: url) else {
+            throw RelayError("Could not read the Google Desktop OAuth client JSON.")
+        }
+        return try decode(data, expectedEmail: expectedEmail)
+    }
+
+    static func decode(_ data: Data, expectedEmail: String) throws -> Self {
         struct DesktopClient: Decodable {
             let email: String?
             let installed: ClientCredentials
         }
 
-        guard let data = try? Data(contentsOf: url),
-              let client = try? JSONDecoder().decode(DesktopClient.self, from: data),
+        guard let client = try? JSONDecoder().decode(DesktopClient.self, from: data),
               !client.installed.clientID.isEmpty, !client.installed.clientSecret.isEmpty else {
             throw RelayError("Could not read the Google Desktop OAuth client JSON.")
         }
@@ -53,34 +59,48 @@ struct OAuth {
     let client: ClientCredentials
 
     init(role: MailboxRole, configuration: Configuration, configPath: String) throws {
-        self.role = role
-        email = configuration.email(for: role)
-        client = try ClientCredentials.load(
+        let email = configuration.email(for: role)
+        let client = try ClientCredentials.load(
             configuration.clientFile(for: role, relativeTo: configPath), expectedEmail: email
         )
+        self.init(role: role, email: email, client: client)
+    }
+
+    init(role: MailboxRole, email: String, client: ClientCredentials) {
+        self.role = role
+        self.email = email
+        self.client = client
     }
 
     func authorize(importToken: Bool) async throws {
         let refreshToken: String
         if importToken {
             refreshToken = try RefreshTokenImport.read(role: role, email: email, client: client)
+            _ = try await verifiedMailbox(refreshToken: refreshToken)
         } else {
-            let grant = try await BrowserAuthorization.requestCode(
-                clientID: client.clientID, loginHint: email, scope: role.scope
-            )
-            let response = try await exchange([
-                "grant_type": "authorization_code",
-                "code": grant.code,
-                "code_verifier": grant.verifier,
-                "redirect_uri": grant.redirectURI
-            ])
-            guard let token = response.refreshToken, !token.isEmpty else {
-                throw RelayError("Google did not return an offline refresh token.")
-            }
-            refreshToken = token
+            refreshToken = try await requestVerifiedRefreshToken()
         }
+        try storeRefreshToken(refreshToken)
+    }
 
+    func requestVerifiedRefreshToken() async throws -> String {
+        let grant = try await BrowserAuthorization.requestCode(
+            clientID: client.clientID, loginHint: email, scope: role.scope
+        )
+        let response = try await exchange([
+            "grant_type": "authorization_code",
+            "code": grant.code,
+            "code_verifier": grant.verifier,
+            "redirect_uri": grant.redirectURI
+        ])
+        guard let refreshToken = response.refreshToken, !refreshToken.isEmpty else {
+            throw RelayError("Google did not return an offline refresh token.")
+        }
         _ = try await verifiedMailbox(refreshToken: refreshToken)
+        return refreshToken
+    }
+
+    func storeRefreshToken(_ refreshToken: String) throws {
         try RefreshTokenKeychain().save(refreshToken, account: keychainAccount)
     }
 

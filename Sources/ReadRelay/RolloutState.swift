@@ -37,34 +37,55 @@ final class RolloutState {
         let secondary = configuration.secondaryEmail.lowercased()
         sqlite3_busy_timeout(handle, 5_000)
         do {
-            if let previewStartedAt {
-                let fiveDays: TimeInterval = 5 * 24 * 60 * 60
-                let initialCutoff = Int64(previewStartedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
+            if create {
                 try Self.execute("""
                     CREATE TABLE IF NOT EXISTS rollout (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         primary_email TEXT NOT NULL,
                         secondary_email TEXT NOT NULL,
-                        cutoff_ms INTEGER NOT NULL
+                        cutoff_ms INTEGER NOT NULL,
+                        primary_label TEXT NOT NULL
                     )
                     """, in: handle)
+            } else if try !Self.hasTable("rollout", in: handle) {
+                throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+            }
+
+            // State created by the manual CLI before labels were configurable always used ReadRelay.
+            let recordsLabel = try Self.prepare(
+                "SELECT 1 FROM pragma_table_info('rollout') WHERE name = 'primary_label'", in: handle
+            ) { statement in
+                let status = sqlite3_step(statement)
+                guard status == SQLITE_ROW || status == SQLITE_DONE else {
+                    throw RelayError("Could not inspect the rollout's primary label.")
+                }
+                return status == SQLITE_ROW
+            }
+            let labelMismatch = RelayError("The SQLite rollout state belongs to a different primary Gmail label. Use fresh state and preview the new label.")
+            if !recordsLabel, configuration.primaryLabel != Configuration.defaultPrimaryLabel {
+                throw labelMismatch
+            }
+            let labelColumn = recordsLabel ? ", primary_label" : ""
+            if let previewStartedAt {
+                let fiveDays: TimeInterval = 5 * 24 * 60 * 60
+                let initialCutoff = Int64(previewStartedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
+                let labelParameter = recordsLabel ? ", ?" : ""
                 try Self.prepare("""
-                    INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms)
-                    VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO NOTHING
+                    INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms\(labelColumn))
+                    VALUES (1, ?, ?, ?\(labelParameter)) ON CONFLICT(singleton) DO NOTHING
                     """, in: handle) { statement in
                     try Self.bind(primary, to: statement, at: 1)
                     try Self.bind(secondary, to: statement, at: 2)
                     guard sqlite3_bind_int64(statement, 3, initialCutoff) == SQLITE_OK else {
                         throw RelayError("Could not bind the initial cutoff.")
                     }
+                    if recordsLabel { try Self.bind(configuration.primaryLabel, to: statement, at: 4) }
                     try Self.finish(statement)
                 }
-            } else if try !Self.hasTable("rollout", in: handle) {
-                throw RelayError("Run a successful dry run with this SQLite state before syncing.")
             }
 
             cutoff = try Self.prepare(
-                "SELECT primary_email, secondary_email, cutoff_ms FROM rollout WHERE singleton = 1",
+                "SELECT primary_email, secondary_email, cutoff_ms\(labelColumn) FROM rollout WHERE singleton = 1",
                 in: handle
             ) { statement in
                 guard sqlite3_step(statement) == SQLITE_ROW,
@@ -74,6 +95,7 @@ final class RolloutState {
                 guard Self.columnText(statement, 0) == primary, Self.columnText(statement, 1) == secondary else {
                     throw RelayError("The SQLite rollout state belongs to a different mailbox pair.")
                 }
+                if recordsLabel, Self.columnText(statement, 3) != configuration.primaryLabel { throw labelMismatch }
                 return sqlite3_column_int64(statement, 2)
             }
         } catch {

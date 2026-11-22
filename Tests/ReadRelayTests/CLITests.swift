@@ -12,6 +12,77 @@ final class CLITests: XCTestCase {
         XCTAssertNotNil(output.wholeMatch(of: /[0-9]+\.[0-9]+\.[0-9]+\n/))
     }
 
+    func testSetupRejectsTheSameMailboxBeforeAuthorizingEitherRole() throws {
+        let home = try temporaryDirectory()
+        let result = try runCLI([
+            "setup", "--primary-email", "same@example.com", "--secondary-email", "SAME@example.com",
+            "--oauth-client-file", home.appendingPathComponent("unused.json").path
+        ], home: home)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.error.contains("distinct Gmail mailboxes"), result.error)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: home.appendingPathComponent("Library/Application Support/ReadRelay/config.json").path
+        ))
+    }
+
+    func testSetupRequiresADesktopClientFileBeforeOpeningTheBrowser() throws {
+        let home = try temporaryDirectory()
+        let client = home.appendingPathComponent("client.json")
+        try Data("""
+            {"web":{"client_id":"test","client_secret":"unused"}}
+            """.utf8).write(to: client)
+
+        let result = try runCLI([
+            "setup", "--primary-email", "primary@example.com", "--secondary-email", "secondary@example.com",
+            "--oauth-client-file", client.path
+        ], home: home)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.error.contains("Google Desktop OAuth client JSON"), result.error)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: home.appendingPathComponent("Library/Application Support/ReadRelay/config.json").path
+        ))
+    }
+
+    func testPreviewWithNoMailboxPairGivesSetupInstructions() throws {
+        let home = try temporaryDirectory()
+        let result = try runCLI(["preview", "--json"], home: home)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.error.contains("Run readrelay setup first."), result.error)
+        XCTAssertTrue(result.output.isEmpty)
+    }
+
+    func testSetupDoesNotReplaceTheConfiguredMailboxPair() throws {
+        let home = try temporaryDirectory()
+        let directory = home.appendingPathComponent("Library/Application Support/ReadRelay")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let config = directory.appendingPathComponent("config.json")
+        let original = Data("""
+            {"primaryEmail":"original@example.com","secondaryEmail":"copies@example.com",
+             "primaryOAuthClientFile":"oauth-client.json","secondaryOAuthClientFile":"oauth-client.json"}
+            """.utf8)
+        try original.write(to: config)
+        let client = home.appendingPathComponent("downloaded-client.json")
+        try Data("""
+            {"installed":{"client_id":"local-client","client_secret":"unused"}}
+            """.utf8).write(to: client)
+
+        let result = try runCLI([
+            "setup", "--primary-email", "other@example.com", "--secondary-email", "other-copies@example.com",
+            "--oauth-client-file", client.path
+        ], home: home)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.error.contains("A mailbox pair is already configured"), result.error)
+        XCTAssertEqual(try Data(contentsOf: config), original)
+        for folder in [directory, directory.appendingPathComponent("logs")] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: folder.path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        }
+    }
+
     func testLaunchAgentSchedulesOnlyUnattendedPreviewsByDefault() throws {
         let executable = "/Users/owner/Library/Application Support/ReadRelay & Dot/readrelay"
         let config = "/Users/owner/Library/Application Support/ReadRelay & Dot/config.json"
@@ -98,6 +169,30 @@ final class CLITests: XCTestCase {
         let cutoffOnly = try runCLI(arguments + ["--apply"])
         XCTAssertNotEqual(cutoffOnly.status, 0)
         XCTAssertTrue(cutoffOnly.error.contains("successful dry run"), cutoffOnly.error)
+    }
+
+    func testSyncRejectsASavedPreviewForADifferentPrimaryLabel() throws {
+        let directory = try temporaryDirectory()
+        let config = directory.appendingPathComponent("config.json")
+        let state = directory.appendingPathComponent("state.sqlite")
+        try Data("""
+            {"primaryEmail":"primary@example.com","secondaryEmail":"secondary@example.com",
+             "primaryOAuthClientFile":"unused.json","secondaryOAuthClientFile":"unused.json",
+             "primaryLabel":"Different label","enableWrites":true}
+            """.utf8).write(to: config)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(state.path, &database), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, """
+            CREATE TABLE rollout (singleton INTEGER PRIMARY KEY, primary_email TEXT,
+                                  secondary_email TEXT, cutoff_ms INTEGER, primary_label TEXT);
+            INSERT INTO rollout VALUES (1, 'primary@example.com', 'secondary@example.com', 1700000000000, 'Old label');
+            CREATE TABLE previewed_backlog (original_id TEXT, copy_id TEXT, message_id TEXT, completed INTEGER);
+            """, nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
+
+        let result = try runCLI(["sync", "--config", config.path, "--state", state.path, "--apply"])
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.error.contains("different primary Gmail label"), result.error)
     }
 
     func testDryRunRejectsTheSameMailboxInBothRoles() throws {
@@ -394,7 +489,9 @@ final class CLITests: XCTestCase {
         return directory
     }
 
-    func runCLI(_ arguments: [String], input: Data = Data()) throws -> (status: Int32, output: Data, error: String) {
+    func runCLI(
+        _ arguments: [String], input: Data = Data(), home: URL? = nil
+    ) throws -> (status: Int32, output: Data, error: String) {
         let directory = try temporaryDirectory()
         let errorFile = directory.appendingPathComponent("stderr")
         try Data().write(to: errorFile)
@@ -405,6 +502,11 @@ final class CLITests: XCTestCase {
         process.executableURL = Bundle(for: CLITests.self).bundleURL.deletingLastPathComponent()
             .appendingPathComponent("readrelay")
         process.arguments = arguments
+        if let home {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CFFIXED_USER_HOME"] = home.path
+            process.environment = environment
+        }
         let output = Pipe()
         process.standardOutput = output
         process.standardError = errorHandle
