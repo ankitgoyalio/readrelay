@@ -14,11 +14,9 @@ struct VerifyForwarding: AsyncParsableCommand {
             throw ValidationError("Copy one Message-ID from Show original in the primary Gmail mailbox.")
         }
         let paths = BetaPaths()
-        _ = try paths.loadConfiguration()
-        try await paths.withLock {
-            let configuration = try paths.loadConfiguration()
+        try await paths.withConfiguredLock { configuration in
             let mailboxes = try await paths.connect(configuration: configuration, unattended: false)
-            let labelID = mailboxes.readRelayLabelID
+            let labelID = mailboxes.primaryLabelID
             let originals = try await mailboxes.primary.messages(labelID: labelID)
                 .filter { $0.labelIds?.contains(labelID) == true }
 
@@ -68,7 +66,13 @@ private struct ForwardingProof: Codable, Equatable {
 
 extension BetaPaths {
     /// Call with the current Gmail label ID while holding the beta state lock.
-    func hasForwardingProof(for configuration: Configuration, labelID: String) throws -> Bool {
+    func requireForwardingProof(for configuration: Configuration, labelID: String) throws {
+        guard try hasForwardingProof(for: configuration, labelID: labelID) else {
+            throw RelayError("Run readrelay verify-forwarding with a known test Message-ID before enabling writes.")
+        }
+    }
+
+    private func hasForwardingProof(for configuration: Configuration, labelID: String) throws -> Bool {
         let forwardingProof = scopeFile("forwarding-proof", extension: "json", for: configuration)
         let data: Data
         do {

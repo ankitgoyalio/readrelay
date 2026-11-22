@@ -1,6 +1,6 @@
 enum SyncEngine {
     static func run(
-        rollout: RolloutState, originalID: String? = nil, copyID: String? = nil,
+        rollout: RolloutState, selection: (originalID: String, copyID: String)? = nil,
         connect: () async throws -> RelayMailboxes
     ) async throws -> BacklogReport {
         guard let current = try rollout.currentWork() else {
@@ -8,7 +8,7 @@ enum SyncEngine {
         }
         let batch = current.batch
         var work = current.messages
-        if let originalID, let copyID {
+        if let (originalID, copyID) = selection {
             let backlog = batch == .reviewed ? work : try rollout.messages(in: .reviewed) ?? []
             guard backlog.contains(where: { $0.originalID == originalID && $0.copyID == copyID }),
                   let pair = work.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
@@ -17,9 +17,9 @@ enum SyncEngine {
             work = [pair]
         }
         let report = try await applyWork(
-            work, in: batch, discover: batch == .ongoing && originalID == nil, rollout: rollout, connect: connect
+            work, in: batch, discover: batch == .ongoing && selection == nil, rollout: rollout, connect: connect
         )
-        if batch == .reviewed, originalID == nil {
+        if batch == .reviewed, selection == nil {
             try rollout.startIncrementalSync()
         }
         return report
@@ -39,7 +39,7 @@ enum SyncEngine {
         let mailboxes = try await connect()
         let primary = mailboxes.primary
         let secondary = mailboxes.secondary
-        let labelID = mailboxes.readRelayLabelID
+        let labelID = mailboxes.primaryLabelID
         func scan() async throws -> BacklogReport {
             try await BacklogReport.scan(mailboxes: mailboxes, cutoff: cutoff, work: savedWork, discover: discover)
         }

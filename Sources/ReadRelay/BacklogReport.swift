@@ -87,7 +87,7 @@ struct BacklogReport: Encodable {
         let backlog = try rollout.messages(in: .reviewed)
         let report = try await scan(
             primary: mailboxes.primary, secondary: mailboxes.secondary,
-            labelID: mailboxes.readRelayLabelID, cutoff: rollout.cutoff,
+            labelID: mailboxes.primaryLabelID, cutoff: rollout.cutoff,
             originalIDs: backlog.map { Set($0.map(\.originalID)) }
         )
         if let backlog { return report.rechecking(backlog) }
@@ -98,7 +98,7 @@ struct BacklogReport: Encodable {
     static func betaPreview(
         mailboxes: RelayMailboxes, rollout: RolloutState, configuration: Configuration
     ) async throws -> Self {
-        let labelID = mailboxes.readRelayLabelID
+        let labelID = mailboxes.primaryLabelID
         if let work = try rollout.currentWork() {
             try rollout.requireBetaLabel(labelID)
             let discover = work.batch == .ongoing
@@ -139,7 +139,7 @@ struct BacklogReport: Encodable {
         let originalIDs = discover ? nil : Set(work.filter { !$0.completed }.map(\.originalID))
         let completedIDs = Set(work.filter(\.completed).map(\.originalID))
         return try await scan(
-            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: mailboxes.readRelayLabelID,
+            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: mailboxes.primaryLabelID,
             cutoff: cutoff, originalIDs: originalIDs, excludingOriginalIDs: completedIDs
         )
     }

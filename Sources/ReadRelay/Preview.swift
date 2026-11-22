@@ -13,9 +13,7 @@ struct Preview: AsyncParsableCommand {
     func run() async throws {
         let startedAt = Date()
         let paths = BetaPaths()
-        _ = try paths.loadConfiguration()
-        try await paths.withLock {
-            let configuration = try paths.loadConfiguration()
+        try await paths.withConfiguredLock { configuration in
             let mailboxes = try await paths.connect(configuration: configuration, unattended: unattended)
             let rollout = try RolloutState(
                 path: paths.state(for: configuration).path, configuration: configuration,

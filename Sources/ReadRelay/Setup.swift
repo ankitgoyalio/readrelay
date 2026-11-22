@@ -82,9 +82,7 @@ struct SetLabel: AsyncParsableCommand {
 
     func run() async throws {
         let paths = BetaPaths()
-        _ = try paths.loadConfiguration()
-        try await paths.withLock {
-            let current = try paths.loadConfiguration()
+        try await paths.withConfiguredLock { current in
             let next = current.withFreshScope(primaryLabel: label)
             try next.validate()
             try paths.saveConfiguration(next)

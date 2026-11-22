@@ -12,9 +12,7 @@ struct Approve: AsyncParsableCommand {
 
     func run() async throws {
         let paths = BetaPaths()
-        _ = try paths.loadConfiguration()
-        try await paths.withLock {
-            let configuration = try paths.loadConfiguration()
+        try await paths.withConfiguredLock { configuration in
             let state = paths.state(for: configuration)
             let reviewRequired = RelayError("Run readrelay preview and use its current review code.")
             guard FileManager.default.fileExists(atPath: state.path) else { throw reviewRequired }
@@ -23,10 +21,7 @@ struct Approve: AsyncParsableCommand {
                   let digest = scope.reportDigest else { throw reviewRequired }
             try paths.requireFreshHomebrewPreview(rollout: rollout, configuration: configuration)
             // Check the local evidence first. Preview then verifies the saved scope against Gmail's current label ID.
-            let proofRequired = RelayError("Run readrelay verify-forwarding with a known test Message-ID before approving writes.")
-            guard try paths.hasForwardingProof(for: configuration, labelID: scope.labelID) else {
-                throw proofRequired
-            }
+            try paths.requireForwardingProof(for: configuration, labelID: scope.labelID)
 
             let changed = RelayError("The saved backlog’s preview has changed. Run readrelay preview and review it again.")
             guard let savedReport = try? Data(contentsOf: paths.previewReport(for: configuration)),
@@ -45,9 +40,7 @@ struct Revoke: AsyncParsableCommand {
 
     func run() async throws {
         let paths = BetaPaths()
-        _ = try paths.loadConfiguration()
-        try await paths.withLock {
-            let configuration = try paths.loadConfiguration()
+        try await paths.withConfiguredLock { configuration in
             let state = paths.state(for: configuration)
             guard FileManager.default.fileExists(atPath: state.path) else { return }
             let rollout = try RolloutState(path: state.path, configuration: configuration)

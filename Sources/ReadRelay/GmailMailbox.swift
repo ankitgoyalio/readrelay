@@ -3,7 +3,7 @@ import Foundation
 struct RelayMailboxes {
     let primary: GmailMailbox
     let secondary: GmailMailbox
-    let readRelayLabelID: String
+    let primaryLabelID: String
 
     init(configuration: Configuration, configPath: String, unattended: Bool, homebrew: Bool = false) async throws {
         func configuredOAuth(_ role: MailboxRole) throws -> OAuth {
@@ -15,7 +15,7 @@ struct RelayMailboxes {
         let secondaryOAuth = try configuredOAuth(.secondary)
         if unattended { try OAuth.preventKeychainPrompts() }
         primary = try await primaryOAuth.mailbox()
-        readRelayLabelID = try await primary.labelID(named: configuration.primaryLabel)
+        primaryLabelID = try await primary.labelID(named: configuration.primaryLabel)
         secondary = try await secondaryOAuth.mailbox()
     }
 }

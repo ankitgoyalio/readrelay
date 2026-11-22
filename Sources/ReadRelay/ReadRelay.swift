@@ -188,7 +188,13 @@ struct Sync: AsyncParsableCommand {
         guard configuration.enableWrites == true else {
             throw RelayError("Set enableWrites to true in the configuration after reviewing the dry run.")
         }
-        guard (originalID == nil) == (copyID == nil) else {
+        let selection: (String, String)?
+        switch (originalID, copyID) {
+        case let (.some(original), .some(copy)):
+            selection = (original, copy)
+        case (.none, .none):
+            selection = nil
+        default:
             throw RelayError("Pass --original-id and --copy-id together to limit the sync to one reviewed pair.")
         }
         try await RolloutState.withSyncLock(path: state) {
@@ -196,7 +202,7 @@ struct Sync: AsyncParsableCommand {
             guard try rollout.betaScope() == nil else {
                 throw RelayError("Use readrelay preview, approve, and revoke for the Homebrew setup.")
             }
-            let report = try await SyncEngine.run(rollout: rollout, originalID: originalID, copyID: copyID) {
+            let report = try await SyncEngine.run(rollout: rollout, selection: selection) {
                 try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
             }
             print(try report.json())

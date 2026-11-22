@@ -21,6 +21,13 @@ struct BetaPaths {
         return try await RolloutState.withLock(at: directory.appendingPathComponent("beta.lock").path, run: run)
     }
 
+    func withConfiguredLock<Value>(run: (Configuration) async throws -> Value) async throws -> Value {
+        _ = try loadConfiguration()
+        return try await withLock {
+            try await run(loadConfiguration())
+        }
+    }
+
     func requireManualPaths(_ paths: String...) throws {
         let roots = [directory.standardizedFileURL, directory.resolvingSymlinksInPath()].map {
             $0.path.lowercased()

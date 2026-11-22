@@ -24,11 +24,11 @@ struct ServiceRun: AsyncParsableCommand {
                 )
 
                 if try rollout.betaScope()?.approvedReviewCode != nil {
-                    try rollout.requireBetaLabel(mailboxes.readRelayLabelID)
-                    guard try rollout.lastHomebrewPreview() != nil,
-                          try paths.hasForwardingProof(for: configuration, labelID: mailboxes.readRelayLabelID) else {
-                        throw RelayError("The saved scope needs a successful Homebrew preview and forwarding verification. Run readrelay revoke, then verify forwarding and review a new preview.")
+                    try rollout.requireBetaLabel(mailboxes.primaryLabelID)
+                    guard try rollout.lastHomebrewPreview() != nil else {
+                        throw RelayError("The saved scope needs a successful Homebrew preview. Run readrelay revoke and review a new preview.")
                     }
+                    try paths.requireForwardingProof(for: configuration, labelID: mailboxes.primaryLabelID)
                     _ = try await SyncEngine.run(rollout: rollout) { mailboxes }
                     let date = Date()
                     try rollout.recordLiveRun(at: date)
