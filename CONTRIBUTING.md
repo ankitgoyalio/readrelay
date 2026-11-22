@@ -120,3 +120,32 @@ env READRELAY_SEEDED_INCREMENTAL_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/r
 ```
 
 A static set of seeded Gmail messages does not establish when a copy arrived, when an original became read, or whether it was marked unread again between syncs. The staged check still needs a real delayed delivery to cover late arrival, and a changing primary read state over time to demonstrate a weeks-later read or an unread reminder before a retry. With the originals continuously labeled, the test also cannot distinguish saved pending work from rediscovery. That requires staging an original that temporarily loses its label and checking for `originalUnavailable` after a restart. The selected-pair write check covers a completed retry and the state left by an interrupted progress save. A crash during a Gmail write and a later primary read-state change after completion require separate staged checks. Missing headers and ambiguous matches require real seeds exhibiting those conditions.
+
+## Verify production OAuth past day seven
+
+**Status: Pending.** [Issue #17](https://github.com/ankitgoyalio/readrelay/issues/17) needs a published Homebrew release and a volunteer with a clean Apple silicon macOS login, a dedicated Google Cloud project they own, and two distinct Gmail accounts they control. Use test mailboxes and keep the service in preview mode throughout the check. The public guide uses **Testing** for initial verification while this result is pending.
+
+1. Install the published build using the [Homebrew install guide](README.md#install-the-macos-beta). Record the release version and macOS version. Use a login with no previous ReadRelay configuration, state, or Keychain grants.
+2. Enable the Gmail API and configure the scopes and one **Desktop app** client as in [Create your Google OAuth client](README.md#create-your-google-oauth-client). For this check, use a separate project dedicated to the two test mailboxes and set its **External** audience to **In production** before either authorization. Google makes the project available to Google Accounts in this mode. Keep the client JSON private and do not distribute it. Proceed only within Google's verification rules. If Google or the account administrator blocks authorization, record the block and end the attempt. [Google publishing status](https://support.google.com/cloud/answer/15549945), [Restricted-scope verification and exceptions](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification)
+3. Run the installed CLI with the same client file for both accounts. Select the intended account at each consent prompt. Record each grant's consent time in UTC and any warning or error, with private details removed. Set up the test label and use the [forwarding guide](README.md#set-up-and-verify-gmail-forwarding) to verify one labeled original and its unique forwarded copy.
+
+   ```fish
+   readrelay setup --oauth-client-file '/path/to/client.json' --primary-email 'primary@example.com' --secondary-email 'secondary@example.com'
+   ```
+
+4. Follow [Run unattended previews](README.md#run-unattended-previews) to start the installed Homebrew service from the test login. Check `brew services list` for registration and use `readrelay status` to record a successful service preview in UTC on the day you authorize both accounts. If you grant Keychain access during setup, capture the baseline after that step.
+5. Keep the same client, mailbox pair, and grants for the duration. After **more than 168 hours from the later consent time**, leave the Mac awake and logged in for a scheduled run. Use `readrelay status` and the latest service log to verify a new unattended preview completed after the deadline without browser or Keychain prompts. Use the success timestamp from the scheduled job as evidence that it refreshed and verified both mailbox grants. If either mailbox must reconnect or a grant is replaced, start a new attempt with fresh consent times.
+6. Record the outcome in [issue #17](https://github.com/ankitgoyalio/readrelay/issues/17) and stop the test service with `brew services stop ankitgoyalio/readrelay/readrelay`. Share only the fields below. Keep credentials, tokens, mailbox addresses, message data, and raw logs private.
+
+| Field | Result |
+| --- | --- |
+| Published release and macOS versions | Pending |
+| External / In production confirmed before both grants | Pending |
+| Primary `gmail.metadata` consent time (UTC), warning or block | Pending |
+| Secondary `gmail.modify` consent time (UTC), warning or block | Pending |
+| First successful Homebrew preview (UTC) | Pending |
+| Post-deadline Homebrew preview (UTC), elapsed hours since later consent | Pending |
+| Primary and secondary grant outcomes, prompts, or sanitized errors | Pending |
+| Overall outcome | Pending |
+
+Record a pass only when the original grants both support a scheduled preview beyond the deadline without intervention. If the run fails or the evidence is incomplete, record what happened and keep **Testing** as the guide's setup for initial verification.
