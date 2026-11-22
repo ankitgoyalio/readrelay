@@ -11,13 +11,19 @@ struct ClientCredentials: Decodable {
     }
 
     static func load(_ url: URL, expectedEmail: String) throws -> Self {
+        guard let data = try? Data(contentsOf: url) else {
+            throw RelayError("Could not read the Google Desktop OAuth client JSON.")
+        }
+        return try decode(data, expectedEmail: expectedEmail)
+    }
+
+    static func decode(_ data: Data, expectedEmail: String) throws -> Self {
         struct DesktopClient: Decodable {
             let email: String?
             let installed: ClientCredentials
         }
 
-        guard let data = try? Data(contentsOf: url),
-              let client = try? JSONDecoder().decode(DesktopClient.self, from: data),
+        guard let client = try? JSONDecoder().decode(DesktopClient.self, from: data),
               !client.installed.clientID.isEmpty, !client.installed.clientSecret.isEmpty else {
             throw RelayError("Could not read the Google Desktop OAuth client JSON.")
         }
@@ -48,44 +54,63 @@ struct RefreshTokenImport: Decodable {
 }
 
 struct OAuth {
-    let role: MailboxRole
-    let email: String
+    let account: MailboxAccount
     let client: ClientCredentials
 
-    init(role: MailboxRole, configuration: Configuration, configPath: String) throws {
-        self.role = role
-        email = configuration.email(for: role)
-        client = try ClientCredentials.load(
-            configuration.clientFile(for: role, relativeTo: configPath), expectedEmail: email
-        )
+    var role: MailboxRole { account.role }
+    var email: String { account.email }
+
+    init(role: MailboxRole, configuration: Configuration, configPath: String, reconnectCommand: String? = nil) throws {
+        let email = configuration.email(for: role)
+        account = MailboxAccount(role: role, email: email, reconnectCommand: reconnectCommand)
+        do {
+            client = try ClientCredentials.load(
+                configuration.clientFile(for: role, relativeTo: configPath), expectedEmail: email
+            )
+        } catch {
+            throw account.failure(error.localizedDescription, nextStep: "Restore the saved Desktop OAuth client JSON.")
+        }
     }
 
-    func authorize(importToken: Bool) async throws {
-        let refreshToken: String
-        if importToken {
-            refreshToken = try RefreshTokenImport.read(role: role, email: email, client: client)
-        } else {
-            let grant = try await BrowserAuthorization.requestCode(
-                clientID: client.clientID, loginHint: email, scope: role.scope
-            )
-            let response = try await exchange([
-                "grant_type": "authorization_code",
-                "code": grant.code,
-                "code_verifier": grant.verifier,
-                "redirect_uri": grant.redirectURI
-            ])
-            guard let token = response.refreshToken, !token.isEmpty else {
-                throw RelayError("Google did not return an offline refresh token.")
-            }
-            refreshToken = token
-        }
+    init(role: MailboxRole, email: String, client: ClientCredentials) {
+        account = MailboxAccount(role: role, email: email, reconnectCommand: nil)
+        self.client = client
+    }
 
+    func verifiedRefreshToken(importToken: Bool) async throws -> String {
+        guard importToken else { return try await requestVerifiedRefreshToken() }
+        let refreshToken = try RefreshTokenImport.read(role: role, email: email, client: client)
         _ = try await verifiedMailbox(refreshToken: refreshToken)
-        try RefreshTokenKeychain().save(refreshToken, account: keychainAccount)
+        return refreshToken
+    }
+
+    func requestVerifiedRefreshToken() async throws -> String {
+        let grant = try await BrowserAuthorization.requestCode(
+            clientID: client.clientID, loginHint: email, scope: role.scope
+        )
+        let response = try await exchange([
+            "grant_type": "authorization_code",
+            "code": grant.code,
+            "code_verifier": grant.verifier,
+            "redirect_uri": grant.redirectURI
+        ])
+        guard let refreshToken = response.refreshToken, !refreshToken.isEmpty else {
+            throw RelayError("Google did not return an offline refresh token.")
+        }
+        _ = try await verifiedMailbox(refreshToken: refreshToken)
+        return refreshToken
+    }
+
+    func storeRefreshToken(_ refreshToken: String) throws {
+        do {
+            try RefreshTokenKeychain().save(refreshToken, account: keychainAccount)
+        } catch {
+            throw account.failure(error.localizedDescription, nextStep: "Unlock your login Keychain and retry.")
+        }
     }
 
     func mailbox() async throws -> GmailMailbox {
-        let refreshToken = try RefreshTokenKeychain().load(account: keychainAccount)
+        let refreshToken = try RefreshTokenKeychain().load(account: keychainAccount, mailbox: account)
         return try await verifiedMailbox(refreshToken: refreshToken)
     }
 
@@ -97,14 +122,14 @@ struct OAuth {
         }
     }
 
-    private var keychainAccount: String {
+    var keychainAccount: String {
         "\(role.rawValue):\(email.lowercased()):\(client.clientID)"
     }
 
     private func verifiedMailbox(refreshToken: String) async throws -> GmailMailbox {
         let token = try await exchange(["grant_type": "refresh_token", "refresh_token": refreshToken])
-        let mailbox = GmailMailbox(role: role, accessToken: token.accessToken)
-        try await mailbox.verifyAccount(expectedEmail: email)
+        let mailbox = GmailMailbox(account: account, accessToken: token.accessToken)
+        try await mailbox.verifyAccount()
         return mailbox
     }
 
@@ -122,12 +147,20 @@ struct OAuth {
         request.httpBody = Data(body.utf8)
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
-        let response: TokenResponse = try await GoogleHTTP.send(request, operation: "\(role.rawValue) OAuth token exchange")
+        let response: TokenResponse
+        do {
+            response = try await GoogleHTTP.send(request, operation: "Google OAuth token exchange")
+        } catch let error as GoogleHTTP.Failure {
+            if case .http(400, "invalid_grant") = error.cause, parameters["grant_type"] == "refresh_token" {
+                throw account.grantFailure("Google rejected the refresh token (invalid_grant).")
+            }
+            throw account.googleFailure(error)
+        }
         guard let scope = response.scope, Set(scope.split(separator: " ").map(String.init)) == [role.scope] else {
-            throw RelayError("The \(role.rawValue) Gmail grant must contain exactly \(role.scope).")
+            throw account.grantFailure("The Gmail grant must contain exactly \(role.scope).")
         }
         guard response.tokenType.caseInsensitiveCompare("Bearer") == .orderedSame, !response.accessToken.isEmpty else {
-            throw RelayError("Google returned an invalid \(role.rawValue) access token.")
+            throw account.failure("Google returned an invalid access token.", nextStep: "Retry and check the status if the failure persists.")
         }
         return response
     }
@@ -156,21 +189,26 @@ private struct RefreshTokenKeychain {
         ]
     }
 
-    func load(account: String) throws -> String {
+    func load(account: String, mailbox: MailboxAccount) throws -> String {
         var request = query(account: account)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound {
-            throw RelayError("A refresh token is missing from Keychain. Run readrelay authorize for that mailbox.")
+            throw mailbox.grantFailure("The refresh token is missing from Keychain.")
         }
-        if status == errSecInteractionNotAllowed {
-            throw RelayError("Keychain access requires interaction. Unlock the login Keychain and allow this ReadRelay executable to access the refresh token.")
+        if [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled].contains(status) {
+            throw mailbox.failure("Keychain access requires interaction (status \(status)).",
+                                  nextStep: "Unlock your login Keychain and run an interactive preview to allow this ReadRelay executable to access the refresh token.")
         }
-        guard status == errSecSuccess, let data = result as? Data,
+        guard status == errSecSuccess else {
+            throw mailbox.failure("Could not read the refresh token from Keychain (status \(status)).",
+                                  nextStep: "Check access to your login Keychain and retry.")
+        }
+        guard let data = result as? Data,
               let value = String(data: data, encoding: .utf8), !value.isEmpty else {
-            throw RelayError("Could not read the refresh token from Keychain (status \(status)).")
+            throw mailbox.grantFailure("The refresh token in Keychain is unreadable.")
         }
         return value
     }

@@ -89,7 +89,7 @@ Before enabling recurring writes, record all of the following.
 
 1. A successful unattended preview in the real launchd session, including after wake and after reboot and login.
 2. A successful comparison in Dot’s normal digest flow. A previously included unread control should recur while the copy marked read is omitted. With the digest paused or the result inconclusive, keep scheduled writes disabled pending the maintainer’s decision.
-3. The owner's approval of the rollout report, a successful explicitly approved selected-pair write and retry, and a successful manual full catch-up using the same reviewed SQLite file. Follow [Apply the reviewed backlog](../README.md#apply-the-reviewed-backlog) and check the unread comparison copy remains unread. Record the owner's explicit approval to enable the recurring job.
+3. The owner's approval of the rollout report, a successful explicitly approved selected-pair write and retry, and a successful manual full catch-up using the same reviewed SQLite file. Follow [Apply the reviewed backlog](../CONTRIBUTING.md#apply-the-reviewed-backlog) and check the unread comparison copy remains unread. Record the owner's explicit approval to enable the recurring job.
 
 After the gate passes, set `relay_state` to the absolute path of that same rollout SQLite file and keep `"enableWrites": true` in its configuration. Stop the preview job and stage the replacement. The CLI checks `enableWrites` on every write run.
 

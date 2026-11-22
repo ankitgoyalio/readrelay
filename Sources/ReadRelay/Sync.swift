@@ -1,26 +1,47 @@
-extension Sync {
-    func applyWork(
+enum SyncEngine {
+    static func run(
+        rollout: RolloutState, selection: (originalID: String, copyID: String)? = nil,
+        connect: () async throws -> RelayMailboxes
+    ) async throws -> BacklogReport {
+        guard let current = try rollout.currentWork() else {
+            throw RelayError("Run a successful dry run with this SQLite state before syncing.")
+        }
+        let batch = current.batch
+        var work = current.messages
+        if let (originalID, copyID) = selection {
+            let backlog = batch == .reviewed ? work : try rollout.messages(in: .reviewed) ?? []
+            guard backlog.contains(where: { $0.originalID == originalID && $0.copyID == copyID }),
+                  let pair = work.first(where: { $0.originalID == originalID && $0.copyID == copyID }) else {
+                throw RelayError("The requested message pair is absent from the previewed backlog.")
+            }
+            work = [pair]
+        }
+        let report = try await applyWork(
+            work, in: batch, discover: batch == .ongoing && selection == nil, rollout: rollout, connect: connect
+        )
+        if batch == .reviewed, selection == nil {
+            try rollout.startIncrementalSync()
+        }
+        return report
+    }
+
+    private static func applyWork(
         _ savedWork: [RolloutState.Message], in batch: RolloutState.Batch, discover: Bool,
-        rollout: RolloutState, configuration: Configuration
+        rollout: RolloutState, connect: () async throws -> RelayMailboxes
     ) async throws -> BacklogReport {
         let pending = savedWork.filter { !$0.completed }
-        let cutoff = rollout.cutoff
+        let cutoff = try rollout.cutoff
         if pending.isEmpty, !discover {
             let entries = savedWork.map { BacklogReport.Entry(saved: $0, outcome: .completed) }
             return BacklogReport(cutoffEpochMilliseconds: cutoff, entries: entries)
         }
 
-        let mailboxes = try await RelayMailboxes(configuration: configuration, configPath: config, unattended: unattended)
+        let mailboxes = try await connect()
         let primary = mailboxes.primary
         let secondary = mailboxes.secondary
-        let labelID = mailboxes.readRelayLabelID
-        let originalIDs = discover ? nil : Set(pending.map(\.originalID))
-        let completedIDs = Set(savedWork.filter(\.completed).map(\.originalID))
+        let labelID = mailboxes.primaryLabelID
         func scan() async throws -> BacklogReport {
-            try await BacklogReport.scan(
-                primary: primary, secondary: secondary, labelID: labelID, cutoff: cutoff,
-                originalIDs: originalIDs, excludingOriginalIDs: completedIDs
-            )
+            try await BacklogReport.scan(mailboxes: mailboxes, cutoff: cutoff, work: savedWork, discover: discover)
         }
 
         // Start the change streams before listing either mailbox so changes
@@ -30,9 +51,7 @@ extension Sync {
         var (primaryCursor, secondaryCursor) = try await (initialPrimaryCursor, initialSecondaryCursor)
         let report = try await scan()
         let knownOriginals = Set(savedWork.map(\.originalID))
-        let discovered = report.entries.filter { !knownOriginals.contains($0.originalID) }.map {
-            RolloutState.Message(originalID: $0.originalID, copyID: nil, messageID: $0.messageID, completed: false)
-        }
+        let discovered = report.entries.filter { !knownOriginals.contains($0.originalID) }.map(\.discoveredWork)
         try rollout.saveDiscovered(discovered)
         var claimedCopies = Set(savedWork.compactMap(\.copyID))
         var byID = Dictionary(uniqueKeysWithValues: report.entries.map { ($0.originalID, $0) })
@@ -100,9 +119,7 @@ extension Sync {
                 entries.append(current)
                 continue
             }
-            let canSaveMatch = discover && saved.copyID == nil
-                && (saved.messageID == nil || saved.messageID == messageID)
-                && !claimedCopies.contains(copyID)
+            let canSaveMatch = discover && current.canClaimMatch(for: saved, claimedCopies: claimedCopies)
             guard canSaveMatch || current.matches(saved) else {
                 entries.append(.init(saved: saved, outcome: .matchChanged))
                 continue

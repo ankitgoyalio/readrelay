@@ -1,100 +1,142 @@
-# readrelay
+# ReadRelay
+
 One-way read-status sync for forwarded Gmail messages.
 
-## Preview the five-day backlog
+## Install the macOS beta
 
-Build on macOS with Swift 6 using `swift build`. The executable is `.build/debug/readrelay`.
-
-Enable the Gmail API for your Google Desktop OAuth clients. Keep the downloaded client files and the ReadRelay configuration outside the repository. Use the Gmail addresses returned by Google for the two mailbox accounts.
-
-```json
-{
-  "primaryEmail": "primary@example.com",
-  "secondaryEmail": "secondary@example.com",
-  "primaryOAuthClientFile": "primary-client.json",
-  "secondaryOAuthClientFile": "secondary-client.json"
-}
-```
-
-Relative client paths are resolved from the configuration file. Run authorization separately for each mailbox. The browser flow requests `gmail.metadata` for the primary mailbox and `gmail.modify` for the secondary mailbox. Refresh tokens are stored in separate Keychain entries under the `io.ankitgoyal.readrelay.oauth` service.
+Install the beta on an Apple silicon Mac with [Homebrew](https://brew.sh/). The formula downloads a prebuilt executable from GitHub Releases. ReadRelay itself requires no Swift toolchain to install or run.
 
 ```fish
-.build/debug/readrelay authorize primary --config /path/to/readrelay.json
-.build/debug/readrelay authorize secondary --config /path/to/readrelay.json
+brew install ankitgoyalio/readrelay/readrelay
+readrelay --version
 ```
 
-To import an existing refresh token, add `--import-token` and redirect standard input from a private JSON file with the `email`, `clientID`, and `refreshToken` keys. ReadRelay verifies the client, Gmail account, and granted scope before saving the token.
+The executable targets macOS 13 or later. See the [release notes](https://github.com/ankitgoyalio/readrelay/releases) for macOS versions verified on a clean Apple silicon login. Clean-login verification is pending for the first beta.
+
+## Before you connect
+
+Use two distinct Gmail accounts you control. The primary mailbox receives and keeps the originals. You’ll also need a sender account that matches your filter to send a test message. Dedicate the secondary mailbox to forwarded copies. ReadRelay supports one mailbox pair per macOS login.
+
+ReadRelay makes Gmail API requests from your Mac. It stores refresh tokens in your login Keychain and keeps the OAuth client file, configuration, SQLite sync state, reports, and logs under `~/Library/Application Support/ReadRelay`. ReadRelay has no hosted sync service.
+
+The primary grant covers headers and labels across the mailbox and excludes message bodies. The selected Gmail label determines which originals ReadRelay considers for sync. The secondary grant allows Gmail modifications. ReadRelay uses it to clear unread status on a unique matching forwarded copy after you approve writes. Keep the client file, preview reports, and logs private.
+
+## Create your Google OAuth client
+
+Use a Google Cloud project you own and start with **External** access in **Testing** for the initial beta verification.
+
+1. Create a Google Cloud project and enable the **Gmail API** in it. [Google's Gmail API setup](https://developers.google.com/workspace/gmail/api/quickstart/go#enable_the_api)
+2. In **Google Auth platform**, configure **Branding** with an app name, support email, and contact email. Select **External** under **Audience**, keep the publishing status at **Testing**, and add both Gmail addresses under **Test users**. [Google Auth platform setup](https://support.google.com/cloud/answer/15544987), [Audience and test users](https://support.google.com/cloud/answer/15549945)
+3. Under **Data Access → Add or Remove Scopes**, add `https://www.googleapis.com/auth/gmail.metadata` and `https://www.googleapis.com/auth/gmail.modify`. ReadRelay requests the metadata scope for the primary mailbox and the modify scope for the secondary mailbox. [Configure consent and scopes](https://developers.google.com/workspace/guides/configure-oauth-consent), [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+4. Under **Clients → Create client**, select **Desktop app**, name the client, and download its JSON file. Keep that file private. Supply the same file to `readrelay setup` for both mailboxes and authorize each Gmail account separately when the browser prompts you. [Google's desktop client setup](https://developers.google.com/identity/protocols/oauth2/native-app#creatingcred)
+
+In **Testing**, each refresh token expires seven days after its account grants consent because ReadRelay requests Gmail scopes. Run the initial checks within that window and reconnect the affected mailbox if authorization expires. Google may show a warning when you authorize an unverified project. Review the project name, account, and requested access before granting consent. [Refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [Google's unverified app warning](https://support.google.com/cloud/answer/7454865)
+
+## Connect your mailboxes
+
+Replace the example path and both addresses. If you use a different label in your Gmail filter, replace `ReadRelay` with its exact name.
 
 ```fish
-.build/debug/readrelay authorize primary --config /path/to/readrelay.json --import-token < /path/to/primary-token.json
+readrelay setup --oauth-client-file '/path/to/client.json' --primary-email 'primary@example.com' --secondary-email 'secondary@example.com' --primary-label 'ReadRelay'
 ```
 
-Once the primary mailbox has a `ReadRelay` label on the originals you want to preview, run the dry run with a SQLite path in an existing directory.
+ReadRelay prints the Gmail address to choose for each browser prompt. Authorize the primary mailbox with metadata access, then the secondary mailbox with modify access. Wait for Terminal to confirm that both mailboxes are connected.
+
+## Set up and verify Gmail forwarding
+
+1. In Gmail on the web, sign in to your primary mailbox. Under **Settings → See all settings → Forwarding and POP/IMAP**, add your secondary Gmail address as a forwarding address. Open the confirmation email in the secondary mailbox and confirm the address. Return to the primary mailbox and refresh Gmail settings. For selective forwarding, keep mailbox-wide forwarding disabled. [Gmail forwarding help](https://support.google.com/mail/answer/10957)
+2. In the primary mailbox, create the label you selected in setup if it does not exist. Use **Show search options** in Gmail’s search bar to enter your criteria and choose **Create filter**. If you already have a filter, edit it under **Filters and Blocked Addresses** in Settings. Select **Forward it** and choose your secondary Gmail address. Select **Apply the label** and choose the same label, `ReadRelay` by default. Save the filter. [Gmail filter help](https://support.google.com/mail/answer/6579)
+3. Send a new test email to the primary address from a sender that matches the filter. Include any subject text or other criteria your filter requires. Confirm that Gmail labeled the original and delivered a copy to the secondary mailbox. Leave the secondary copy unread so you can use it to check preview and live sync.
+4. Open the original in the primary mailbox. In the message’s **More → Show original** menu, copy the **Message ID** value. [Gmail message header help](https://support.google.com/mail/answer/29436)
+5. Replace the example with that value, keeping the quotes. ReadRelay checks for one labeled original and exactly one matching forwarded copy. The check works regardless of read status and makes no changes in Gmail.
+
+   ```fish
+   readrelay verify-forwarding '<example-id@example.com>'
+   ```
+
+If verification fails, follow the message in Terminal. Check that Gmail applied the selected label to the original and that the copy arrived at the intended address. If the match is ambiguous, check for overlapping forwarding filters and send a fresh test message.
+
+## Review a preview
+
+Once the primary label exists, you can preview even if you are still diagnosing forwarding.
 
 ```fish
-.build/debug/readrelay dry-run --config /path/to/readrelay.json --state /path/to/rollout.sqlite
+readrelay preview
 ```
 
-Keep the SQLite file for the first live run. The first preview saves a cutoff 120 hours before the run started. The first successful preview saves the backlog of labeled originals at or after that cutoff and their unambiguous forwarded-copy matches. Later previews recheck the saved originals against current Gmail metadata. Both mailboxes are read through Gmail's metadata format. The dry run makes zero Gmail writes.
+The first successful preview saves the labeled originals from the 120 hours before that attempt started. Until the backlog is saved, each retry starts with a fresh five-day window. The summary shows how many forwarded copies would be marked read and why other originals were skipped. Check the secondary inbox without opening the test copy to confirm it stays unread after preview. If its original was in the saved backlog when you opened it and its unique copy is unread, the report proposes a change. If you saved an empty backlog before staging test mail, you can still verify the new pair. Live runs discover eligible originals after processing the saved backlog.
 
-The JSON report contains the cutoff in Unix epoch milliseconds and one entry per eligible original. Each entry includes Gmail message and label IDs for the original and, when unambiguous, for the forwarded copy.
-
-| Outcome | Meaning |
-| --- | --- |
-| `wouldMarkRead` | The original is read and its unique forwarded copy is unread. |
-| `originalUnread` | The original is still unread and its forwarded copy was found. |
-| `copyAlreadyRead` | The original and its forwarded copy are both read. |
-| `missingMessageID` | The original has no usable Message-ID. |
-| `missingCopy` | The original has a usable Message-ID, but there is no matching copy. |
-| `ambiguousOriginal` | Multiple originals or Message-ID values prevent a unique match. |
-| `ambiguousCopy` | Secondary mailbox metadata does not establish a unique match. |
-| `originalUnavailable` | A saved original is no longer eligible for this backlog. |
-| `matchChanged` | Current Gmail metadata identifies a different pair from the saved preview. |
-
-## Apply the reviewed backlog
-
-After reviewing a successful dry run, add `"enableWrites": true` to the configuration and explicitly run `sync --apply` with the same SQLite state file. If the state came from a version that stored only the cutoff, rerun `dry-run` with that file and review the new report first. This preserves the original cutoff and records the backlog.
+ReadRelay prints the path to its detailed JSON report. To read the exact report you just reviewed, replace the example with the printed path, keeping the quotes.
 
 ```fish
-.build/debug/readrelay sync --apply --config /path/to/readrelay.json --state /path/to/rollout.sqlite
+less '/path/from-preview/preview-report.json'
 ```
 
-The first successful full sync applies only the reviewed batch and its saved matches. On later runs, the same command discovers labeled originals whose Gmail internal dates are at or after the saved cutoff. This includes messages received after the preview and messages within the cutoff that receive the label later. The cutoff stays fixed, so reading an original weeks later still counts. Keep using the same SQLite file across runs and restarts. A dry run against that file continues to show the reviewed backlog.
+For scripts, `readrelay preview --json` prints a fresh report to standard output. Each entry includes Gmail message and label IDs and an outcome such as `wouldMarkRead`, `originalUnread`, `missingCopy`, or `ambiguousCopy`. Use plain `readrelay preview` for the final review before approving, since it prints the approval command.
 
-The sync keeps unresolved matches and unread originals pending in SQLite. Once the full reviewed run has succeeded, a pending original can pick up its first unambiguous match, including a late copy. A saved match stays tied to the same copy. Before each Gmail write, sync refreshes the selected pair and checks Gmail History in both mailboxes for changes that could invalidate the match or read status. It rescans when mailbox membership may have changed and stops if it cannot verify the pair. Gmail provides no atomic check and write across mailboxes, so a concurrent change can still race the final write. If Gmail already cleared `UNREAD`, the retry records `copyAlreadyRead` without another write. The report uses `markedRead` for a successful write and `completed` for pairs already recorded as done. Subsequent runs leave completed pairs alone.
+## Run unattended previews
 
-Pass `--original-id` and `--copy-id` together to apply only one saved pair, using the Gmail message IDs from the reviewed report. A run limited to one pair leaves the transition to discovery for the first successful full sync.
-
-## Run on the Mac mini
-
-See the [launchd runbook](docs/launchd.md) for the five-minute preview job, unattended Keychain checks, and the owner approval required for scheduled writes.
-
-## Seeded Gmail check
-
-Run `swift test` for the offline CLI checks. The opt-in Gmail check uses known, labeled original messages in the five-day window and the existing copies in the secondary mailbox. Use a private expectations file containing an array of objects with `originalID`, `forwardedCopyID` (when a unique copy exists), and `outcome`. Include at least one read original with an unread copy and one unread original with an unread copy. Additional seeds can cover the other report outcomes.
+After connecting both mailboxes and creating the primary label, start the background service from your macOS login. Use Homebrew without `sudo`.
 
 ```fish
-env READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_EXPECTATIONS=/path/to/expectations.json swift test --filter testDryRunReportsSeededMatchesAndPreservesTheirGmailLabels
+brew services start ankitgoyalio/readrelay/readrelay
+readrelay status
 ```
 
-The test uses a temporary SQLite file and checks that two consecutive runs keep the same cutoff and report the same Gmail labels for the seeded messages.
+The service runs when it loads, including when you log back in, and every 15 minutes while your Mac is awake and you’re logged in. An interval can be skipped while your Mac is asleep or a run is still active. After wake, ReadRelay picks up on a subsequent interval. A new setup starts in preview mode and leaves Gmail read status unchanged until you approve writes.
 
-The write check deliberately marks one seeded secondary copy read. After approval, use a configuration with `enableWrites` set to `true` and a separate expectations file with exactly one `wouldMarkRead` pair and at least one `originalUnread` pair whose copy is also unread. The check uses temporary SQLite files, compares the previewed labels before and after, and retries from both completed and still-pending state. To run the full check again, start with the target copy unread.
+`readrelay status` shows the mode, when the background job last completed successfully, and the most recent failure. Homebrew reports whether the job is registered with `brew services list`. ReadRelay keeps the latest run log in `~/Library/Application Support/ReadRelay/logs/service.log`.
+
+If status reports that Keychain access requires interaction, unlock your login Keychain and run `readrelay preview` in Terminal using the installed executable. If prompted, choose **Always Allow** for the refresh token. Then run `brew services restart ankitgoyalio/readrelay/readrelay` and check for a new successful run in `readrelay status`.
+
+## Approve recurring sync
+
+After verifying forwarding and seeing a successful Homebrew preview in `readrelay status`, run `readrelay preview`. If the service has failed since its last preview or you’ve replaced either mailbox grant, wait for the Homebrew job to complete a new preview before approving. Review the mailbox pair, primary label, and proposed changes. The preview also gives you the path to the detailed JSON report.
+
+Copy the `readrelay approve` command printed by the preview, including its review code. This approves the work shown and future eligible messages for the displayed pair and label. If ReadRelay reports that the preview changed, run `readrelay preview` and review the new report before approving it.
+
+Check `readrelay status` for **Live** mode. Gmail updates begin on the next background run. The first live run handles the saved backlog. Later runs also discover eligible originals and retry pending work, including originals you leave unread for more than five days.
+
+Pause background sync with `brew services stop ankitgoyalio/readrelay/readrelay`. Starting the service again preserves approval and pending work. To withdraw approval while leaving the schedule in place, run `readrelay revoke`. If a run is active, wait for it to finish and retry the revoke command. Once revoke succeeds, the service runs in **Preview** mode. If live sync has already processed the initial backlog, a new preview shows saved pending work and newly eligible originals. Completed pairs stay excluded even if their copies were marked unread again.
+
+## Reconnect a Gmail mailbox
+
+If `readrelay status` reports an expired or revoked grant, run the command it shows, `readrelay reconnect primary` or `readrelay reconnect secondary`. In your browser, choose the Gmail address shown in Terminal and grant the requested permission. ReadRelay uses the saved Desktop OAuth client and checks the account and scope before replacing that mailbox’s grant.
+
+If another ReadRelay command is running, wait for it to finish and retry. With the service running, check `readrelay status` after the next interval for a new successful run. The service resumes its saved mode and pending work, including any existing write approval.
+
+## Change the mailbox pair or primary label
+
+To switch labels, run `readrelay set-label 'New label'` and update the Gmail forwarding filter. Use the same command with the current label name if you deleted and recreated that label in Gmail.
+
+To switch mailboxes, run setup with `--replace` and authorize both accounts.
 
 ```fish
-env READRELAY_SEEDED_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_WRITE_EXPECTATIONS=/path/to/write-expectations.json swift test --filter testSyncMarksOnlyTheSelectedSeededCopyAndCanBeRerun
+readrelay setup --replace --oauth-client-file '/path/to/client.json' --primary-email 'primary@example.com' --secondary-email 'secondary@example.com' --primary-label 'ReadRelay'
 ```
 
-To check a pair from an existing reviewed backlog, also set `READRELAY_SEEDED_REVIEWED_STATE` to the closed SQLite file from a successful dry run that has never run sync. The test copies that file into both temporary paths, preserving the reviewed backlog and cutoff. With the variable unset, both temporary states get fresh previews.
+Either change starts a fresh backlog in preview mode. Verify forwarding for the new scope, wait for its first successful background preview, then review it before approving writes. ReadRelay retains the previous scope’s files on disk.
 
-### Incremental sync with staged Gmail seeds
-
-The incremental check runs full write-enabled syncs. Use dedicated seeded mailboxes and review all eligible messages before opting in, since any eligible read original can cause its copy to be marked read. Start with a successful dry-run SQLite file that has never run `sync`. Its preview must include a known unread original with an unread copy. After saving the preview, make a different real unread pair eligible by labeling its original `ReadRelay`. The original must be within the saved cutoff. Leave both copies unread. The test copies the closed SQLite file into a temporary directory and uses the same temporary state across separate CLI processes.
-
-Create a private expectations file with `reviewedUnreadOriginalID`, `newUnreadOriginalID`, and `newUnreadCopyID`. If the original preview also captured a known unread original before its copy arrived, add `lateUnreadCopy` with `originalID` and `copyID` once that copy is present and unread. The test checks that the first run stays within the previewed batch, later runs find the newly labeled original, and the unread pairs stay pending across invocations. With a staged late copy it also checks that the first run skips the unreviewed match and the next run finds it.
+## Upgrade
 
 ```fish
-env READRELAY_SEEDED_INCREMENTAL_APPLY=1 READRELAY_SEEDED_TEST_CONFIG=/path/to/readrelay.json READRELAY_SEEDED_REVIEWED_STATE=/path/to/reviewed.sqlite READRELAY_SEEDED_INCREMENTAL_EXPECTATIONS=/path/to/incremental-expectations.json swift test --filter testSyncDiscoversNewSeededOriginalsAfterApplyingTheReviewedBacklog
+brew update
+brew upgrade ankitgoyalio/readrelay/readrelay
+readrelay --version
 ```
 
-A static set of seeded Gmail messages does not establish when a copy arrived, when an original became read, or whether it was marked unread again between syncs. The staged check still needs a real delayed delivery to cover late arrival, and a changing primary read state over time to demonstrate a weeks-later read or an unread reminder before a retry. With the originals continuously labeled, the test also cannot distinguish saved pending work from rediscovery. That requires staging an original that temporarily loses its label and checking for `originalUnavailable` after a restart. The selected-pair write check covers a completed retry and the state left by an interrupted progress save. A crash during a Gmail write and a later primary read-state change after completion require separate staged checks. Missing headers and ambiguous matches require real seeds exhibiting those conditions.
+An upgrade preserves your configuration, SQLite sync state, logs, and Keychain entries. macOS may ask you to reallow Keychain access for the upgraded executable.
+
+## Uninstall
+
+If you started ReadRelay through Homebrew services, stop it first with `brew services stop ankitgoyalio/readrelay/readrelay` from the same macOS login.
+
+```fish
+brew uninstall ankitgoyalio/readrelay/readrelay
+```
+
+Uninstalling removes the executable. Your per-user configuration, SQLite sync state, logs, OAuth client file, and Keychain entries stay on your Mac. To remove your local setup entirely, remove the ReadRelay files for your login and delete its `io.ankitgoyal.readrelay.oauth` entries in Keychain Access. Deleting SQLite state also discards pending sync work. To revoke ReadRelay’s Gmail access, remove the OAuth grant in each Google Account.
+
+## Contribute
+
+See [Contributing](CONTRIBUTING.md) for source builds, offline tests, and opt-in Gmail checks.

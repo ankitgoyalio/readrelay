@@ -16,12 +16,26 @@ final class RolloutState {
     }
 
     private let database: OpaquePointer
-    let cutoff: Int64
+    private let cutoffForAttempt: Int64?
 
-    init(path: String, configuration: Configuration, previewStartedAt: Date? = nil) throws {
+    var cutoff: Int64 {
+        get throws {
+            guard let cutoffForAttempt else {
+                throw RelayError("Could not load the initial cutoff. Run a successful dry run before syncing.")
+            }
+            return cutoffForAttempt
+        }
+    }
+
+    enum PreviewStart {
+        case manual(Date)
+        case beta(Date)
+    }
+
+    init(path: String, configuration: Configuration, preview: PreviewStart? = nil) throws {
         guard !path.isEmpty else { throw RelayError("Provide a path for the SQLite rollout state.") }
         let filePath = URL(fileURLWithPath: path).path
-        let create = previewStartedAt != nil
+        let create = preview != nil
         if !create, !FileManager.default.fileExists(atPath: filePath) {
             throw RelayError("Run a successful dry run with this SQLite state before syncing.")
         }
@@ -37,44 +51,64 @@ final class RolloutState {
         let secondary = configuration.secondaryEmail.lowercased()
         sqlite3_busy_timeout(handle, 5_000)
         do {
-            if let previewStartedAt {
-                let fiveDays: TimeInterval = 5 * 24 * 60 * 60
-                let initialCutoff = Int64(previewStartedAt.addingTimeInterval(-fiveDays).timeIntervalSince1970 * 1_000)
+            if create {
                 try Self.execute("""
                     CREATE TABLE IF NOT EXISTS rollout (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         primary_email TEXT NOT NULL,
                         secondary_email TEXT NOT NULL,
-                        cutoff_ms INTEGER NOT NULL
+                        cutoff_ms INTEGER NOT NULL,
+                        primary_label TEXT NOT NULL
                     )
                     """, in: handle)
-                try Self.prepare("""
-                    INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms)
-                    VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO NOTHING
-                    """, in: handle) { statement in
-                    try Self.bind(primary, to: statement, at: 1)
-                    try Self.bind(secondary, to: statement, at: 2)
-                    guard sqlite3_bind_int64(statement, 3, initialCutoff) == SQLITE_OK else {
-                        throw RelayError("Could not bind the initial cutoff.")
-                    }
-                    try Self.finish(statement)
-                }
             } else if try !Self.hasTable("rollout", in: handle) {
                 throw RelayError("Run a successful dry run with this SQLite state before syncing.")
             }
 
-            cutoff = try Self.prepare(
-                "SELECT primary_email, secondary_email, cutoff_ms FROM rollout WHERE singleton = 1",
+            // State created by the manual CLI before labels were configurable always used ReadRelay.
+            let recordsLabel = try Self.prepare(
+                "SELECT 1 FROM pragma_table_info('rollout') WHERE name = 'primary_label'", in: handle
+            ) { statement in
+                let status = sqlite3_step(statement)
+                guard status == SQLITE_ROW || status == SQLITE_DONE else {
+                    throw RelayError("Could not inspect the rollout's primary label.")
+                }
+                return status == SQLITE_ROW
+            }
+            let labelMismatch = RelayError("The SQLite rollout state belongs to a different primary Gmail label. Use fresh state and preview the new label.")
+            if !recordsLabel, configuration.primaryLabel != Configuration.defaultPrimaryLabel {
+                throw labelMismatch
+            }
+            let labelColumn = recordsLabel ? ", primary_label" : ""
+            func fiveDayCutoff(from start: Date) -> Int64 {
+                Int64(start.addingTimeInterval(-5 * 24 * 60 * 60).timeIntervalSince1970 * 1_000)
+            }
+            if case .manual(let start) = preview {
+                try Self.saveRollout(configuration, cutoff: fiveDayCutoff(from: start), recordsLabel: recordsLabel,
+                                     onConflict: "DO NOTHING", in: handle)
+            }
+
+            let savedCutoff: Int64? = try Self.prepare(
+                "SELECT primary_email, secondary_email, cutoff_ms\(labelColumn) FROM rollout WHERE singleton = 1",
                 in: handle
             ) { statement in
-                guard sqlite3_step(statement) == SQLITE_ROW,
+                let status = sqlite3_step(statement)
+                if status == SQLITE_DONE { return nil }
+                guard status == SQLITE_ROW,
                       sqlite3_column_type(statement, 2) == SQLITE_INTEGER else {
                     throw RelayError("Could not load the initial cutoff. Run a successful dry run before syncing.")
                 }
                 guard Self.columnText(statement, 0) == primary, Self.columnText(statement, 1) == secondary else {
                     throw RelayError("The SQLite rollout state belongs to a different mailbox pair.")
                 }
+                if recordsLabel, Self.columnText(statement, 3) != configuration.primaryLabel { throw labelMismatch }
                 return sqlite3_column_int64(statement, 2)
+            }
+            if case .beta(let start) = preview, try !Self.hasTable(Batch.reviewed.rawValue, in: handle) {
+                // A failed scan has no backlog, including state left by older beta builds.
+                cutoffForAttempt = fiveDayCutoff(from: start)
+            } else {
+                cutoffForAttempt = savedCutoff
             }
         } catch {
             sqlite3_close(handle)
@@ -83,21 +117,45 @@ final class RolloutState {
         database = handle
     }
 
+    private static func saveRollout(
+        _ configuration: Configuration, cutoff: Int64, recordsLabel: Bool,
+        onConflict: String, in database: OpaquePointer
+    ) throws {
+        let labelColumn = recordsLabel ? ", primary_label" : ""
+        let labelParameter = recordsLabel ? ", ?" : ""
+        try prepare("""
+            INSERT INTO rollout (singleton, primary_email, secondary_email, cutoff_ms\(labelColumn))
+            VALUES (1, ?, ?, ?\(labelParameter)) ON CONFLICT(singleton) \(onConflict)
+            """, in: database) { statement in
+            try bind(configuration.primaryEmail.lowercased(), to: statement, at: 1)
+            try bind(configuration.secondaryEmail.lowercased(), to: statement, at: 2)
+            guard sqlite3_bind_int64(statement, 3, cutoff) == SQLITE_OK else {
+                throw RelayError("Could not bind the initial cutoff.")
+            }
+            if recordsLabel { try bind(configuration.primaryLabel, to: statement, at: 4) }
+            try finish(statement)
+        }
+    }
+
     deinit { sqlite3_close(database) }
 
     static func withSyncLock<Value>(path: String, run: () async throws -> Value) async throws -> Value {
         let databasePath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-        let descriptor = open(databasePath + ".sync.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        return try await withLock(at: databasePath + ".sync.lock", run: run)
+    }
+
+    static func withLock<Value>(at path: String, run: () async throws -> Value) async throws -> Value {
+        let descriptor = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw RelayError("Could not open the rollout sync lock.") }
         defer { close(descriptor) }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            throw RelayError("Could not acquire the rollout sync lock. Another sync may be running.")
+            throw RelayError("Could not acquire the rollout sync lock. Wait for the current ReadRelay command to finish and retry.")
         }
         return try await run()
     }
 
     // The table is published with the entire first successful report, including an empty backlog.
-    func savePreview(_ report: BacklogReport) throws {
+    func savePreview(_ report: BacklogReport, beta: (configuration: Configuration, labelID: String)? = nil) throws {
         try transaction {
             guard try !Self.hasTable(Batch.reviewed.rawValue, in: database) else {
                 throw RelayError("Another dry run saved the backlog. Run dry-run again to review it.")
@@ -107,6 +165,84 @@ final class RolloutState {
                 Message(originalID: entry.originalID, copyID: entry.forwardedCopyID,
                         messageID: entry.messageID, completed: false)
             }, into: .reviewed)
+            if let beta {
+                try Self.saveRollout(beta.configuration, cutoff: report.cutoffEpochMilliseconds, recordsLabel: true,
+                                     onConflict: "DO UPDATE SET cutoff_ms = excluded.cutoff_ms", in: database)
+                try Self.execute("""
+                    CREATE TABLE beta_scope (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        label_id TEXT NOT NULL,
+                        review_code TEXT,
+                        report_digest TEXT,
+                        approved_review_code TEXT,
+                        live_succeeded_at REAL
+                    )
+                    """, in: database)
+                try Self.prepare("INSERT INTO beta_scope (singleton, label_id) VALUES (1, ?)", in: database) {
+                    try Self.bind(beta.labelID, to: $0, at: 1)
+                    try Self.finish($0)
+                }
+            }
+        }
+    }
+
+    struct BetaScope {
+        let labelID: String
+        let reviewCode: String?
+        let reportDigest: String?
+        let approvedReviewCode: String?
+        let lastLiveRun: Date?
+    }
+
+    func betaScope() throws -> BetaScope? {
+        guard try Self.hasTable("beta_scope", in: database) else { return nil }
+        return try Self.prepare("""
+            SELECT label_id, review_code, report_digest, approved_review_code, live_succeeded_at
+            FROM beta_scope WHERE singleton = 1
+            """, in: database) { statement in
+            guard sqlite3_step(statement) == SQLITE_ROW, let labelID = Self.columnText(statement, 0) else {
+                throw RelayError("Could not read the saved beta scope.")
+            }
+            let lastLiveRun = sqlite3_column_type(statement, 4) == SQLITE_NULL
+                ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+            return BetaScope(labelID: labelID, reviewCode: Self.columnText(statement, 1),
+                             reportDigest: Self.columnText(statement, 2), approvedReviewCode: Self.columnText(statement, 3),
+                             lastLiveRun: lastLiveRun)
+        }
+    }
+
+    func requireBetaLabel(_ labelID: String) throws {
+        guard try betaScope()?.labelID == labelID else {
+            throw RelayError("The saved backlog is for a different Gmail label ID or has no label ID. Run readrelay set-label with the current label to start a fresh review.")
+        }
+    }
+
+    func recordReview(code: String, digest: String) throws {
+        try Self.prepare("UPDATE beta_scope SET review_code = ?, report_digest = ? WHERE singleton = 1",
+                         in: database) {
+            try Self.bind(code, to: $0, at: 1)
+            try Self.bind(digest, to: $0, at: 2)
+            try Self.finish($0)
+        }
+    }
+
+    func approveReview() throws {
+        try Self.execute("UPDATE beta_scope SET approved_review_code = review_code WHERE singleton = 1", in: database)
+    }
+
+    func revokeReview() throws {
+        try Self.execute("""
+            UPDATE beta_scope SET approved_review_code = NULL, review_code = NULL, report_digest = NULL
+            WHERE singleton = 1
+            """, in: database)
+    }
+
+    func recordLiveRun(at date: Date) throws {
+        try Self.prepare("UPDATE beta_scope SET live_succeeded_at = ? WHERE singleton = 1", in: database) {
+            guard sqlite3_bind_double($0, 1, date.timeIntervalSince1970) == SQLITE_OK else {
+                throw RelayError("Could not save the time of the live run.")
+            }
+            try Self.finish($0)
         }
     }
 
@@ -118,6 +254,45 @@ final class RolloutState {
                 INSERT INTO sync_work (original_id, copy_id, message_id, completed)
                 SELECT original_id, copy_id, message_id, completed FROM previewed_backlog
                 """, in: database)
+        }
+    }
+
+    // Call under the beta state lock after a verified Homebrew job previews both mailboxes.
+    func recordHomebrewPreview(at date: Date) throws {
+        try transaction {
+            guard try Self.hasTable(Batch.reviewed.rawValue, in: database) else {
+                throw RelayError("A successful Homebrew preview requires a saved backlog.")
+            }
+            try Self.execute("""
+                CREATE TABLE IF NOT EXISTS homebrew_preview (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    succeeded_at REAL NOT NULL
+                )
+                """, in: database)
+            try Self.prepare("""
+                INSERT INTO homebrew_preview (singleton, succeeded_at) VALUES (1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET succeeded_at = excluded.succeeded_at
+                """, in: database) { statement in
+                guard sqlite3_bind_double(statement, 1, date.timeIntervalSince1970) == SQLITE_OK else {
+                    throw RelayError("Could not save the time of the Homebrew preview.")
+                }
+                try Self.finish(statement)
+            }
+        }
+    }
+
+    // The database scope is validated on open. Evidence belongs to its saved backlog.
+    func lastHomebrewPreview() throws -> Date? {
+        guard try Self.hasTable(Batch.reviewed.rawValue, in: database),
+              try Self.hasTable("homebrew_preview", in: database) else { return nil }
+        return try Self.prepare("SELECT succeeded_at FROM homebrew_preview WHERE singleton = 1", in: database) {
+            statement in
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return nil }
+            guard status == SQLITE_ROW, sqlite3_column_type(statement, 0) == SQLITE_FLOAT else {
+                throw RelayError("Could not read the last successful Homebrew preview.")
+            }
+            return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
         }
     }
 
@@ -184,6 +359,12 @@ final class RolloutState {
                 ))
             }
         }
+    }
+
+    func currentWork() throws -> (batch: Batch, messages: [Message])? {
+        guard try Self.hasTable(Batch.reviewed.rawValue, in: database) else { return nil }
+        if let ongoing = try messages(in: .ongoing) { return (.ongoing, ongoing) }
+        return try messages(in: .reviewed).map { (.reviewed, $0) }
     }
 
     func saveMatch(originalID: String, copyID: String, messageID: String) throws {

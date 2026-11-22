@@ -37,6 +37,16 @@ struct BacklogReport: Encodable {
         func matches(_ saved: RolloutState.Message) -> Bool {
             forwardedCopyID != nil && forwardedCopyID == saved.copyID && messageID == saved.messageID
         }
+
+        func canClaimMatch(for saved: RolloutState.Message, claimedCopies: Set<String>) -> Bool {
+            guard let forwardedCopyID, let messageID else { return false }
+            return saved.copyID == nil && (saved.messageID == nil || saved.messageID == messageID)
+                && !claimedCopies.contains(forwardedCopyID)
+        }
+
+        var discoveredWork: RolloutState.Message {
+            RolloutState.Message(originalID: originalID, copyID: nil, messageID: messageID, completed: false)
+        }
     }
 
     enum Outcome: String, Encodable {
@@ -73,7 +83,68 @@ struct BacklogReport: Encodable {
         return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds, entries: checked)
     }
 
+    static func preview(mailboxes: RelayMailboxes, rollout: RolloutState) async throws -> Self {
+        let backlog = try rollout.messages(in: .reviewed)
+        let report = try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary,
+            labelID: mailboxes.primaryLabelID, cutoff: rollout.cutoff,
+            originalIDs: backlog.map { Set($0.map(\.originalID)) }
+        )
+        if let backlog { return report.rechecking(backlog) }
+        try rollout.savePreview(report)
+        return report
+    }
+
+    static func betaPreview(
+        mailboxes: RelayMailboxes, rollout: RolloutState, configuration: Configuration
+    ) async throws -> Self {
+        let labelID = mailboxes.primaryLabelID
+        if let work = try rollout.currentWork() {
+            try rollout.requireBetaLabel(labelID)
+            let discover = work.batch == .ongoing
+            let report = try await scan(mailboxes: mailboxes, cutoff: rollout.cutoff, work: work.messages, discover: discover)
+            return report.recheckingRunnable(work.messages, discover: discover)
+        }
+
+        let report = try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: labelID, cutoff: rollout.cutoff
+        )
+        try rollout.savePreview(report, beta: (configuration, labelID))
+        return report
+    }
+
+    private func recheckingRunnable(_ work: [RolloutState.Message], discover: Bool) -> Self {
+        let byID = Dictionary(uniqueKeysWithValues: entries.map { ($0.originalID, $0) })
+        let knownOriginals = Set(work.map(\.originalID))
+        let discovered = entries.filter { !knownOriginals.contains($0.originalID) }.map(\.discoveredWork)
+        let pending = (work + discovered).filter { !$0.completed }
+        let claimedCopies = Set(work.compactMap(\.copyID))
+        let rechecked = pending.map { saved -> Entry in
+            guard let current = byID[saved.originalID] else {
+                return Entry(saved: saved, outcome: .originalUnavailable)
+            }
+            if current.forwardedCopyID != nil, !current.matches(saved),
+               !(discover && current.canClaimMatch(for: saved, claimedCopies: claimedCopies)) {
+                return Entry(saved: saved, outcome: .matchChanged)
+            }
+            return current
+        }
+        return Self(cutoffEpochMilliseconds: cutoffEpochMilliseconds,
+                    entries: rechecked.sorted { $0.originalID < $1.originalID })
+    }
+
     static func scan(
+        mailboxes: RelayMailboxes, cutoff: Int64, work: [RolloutState.Message], discover: Bool
+    ) async throws -> Self {
+        let originalIDs = discover ? nil : Set(work.filter { !$0.completed }.map(\.originalID))
+        let completedIDs = Set(work.filter(\.completed).map(\.originalID))
+        return try await scan(
+            primary: mailboxes.primary, secondary: mailboxes.secondary, labelID: mailboxes.primaryLabelID,
+            cutoff: cutoff, originalIDs: originalIDs, excludingOriginalIDs: completedIDs
+        )
+    }
+
+    private static func scan(
         primary: GmailMailbox, secondary: GmailMailbox, labelID: String, cutoff: Int64,
         originalIDs: Set<String>? = nil, excludingOriginalIDs: Set<String> = []
     ) async throws -> Self {
@@ -106,22 +177,25 @@ struct BacklogReport: Encodable {
             guard originalIndex[id]?.count == 1 else {
                 return Entry(original: original.message, outcome: .ambiguousOriginal)
             }
-            guard let candidates = copyIndex[id], let copy = candidates.first else {
+            let copy: GmailMessage
+            switch IndexedMessage.match(id, among: copyIndex[id, default: []]) {
+            case .missing:
                 return Entry(original: original.message, messageID: id, outcome: .missingCopy)
-            }
-            guard candidates.count == 1, copy.messageID == id else {
+            case .ambiguous:
                 return Entry(original: original.message, messageID: id, outcome: .ambiguousCopy)
+            case .unique(let matched):
+                copy = matched
             }
 
             let outcome: Outcome
             if original.message.isUnread {
                 outcome = .originalUnread
-            } else if copy.message.isUnread {
+            } else if copy.isUnread {
                 outcome = .wouldMarkRead
             } else {
                 outcome = .copyAlreadyRead
             }
-            return Entry(original: original.message, copy: copy.message, messageID: id, outcome: outcome)
+            return Entry(original: original.message, copy: copy, messageID: id, outcome: outcome)
         }
 
         return Self(cutoffEpochMilliseconds: cutoff, entries: entries.sorted { $0.originalID < $1.originalID })
@@ -149,6 +223,26 @@ struct IndexedMessage {
     let candidates: [String]
     let messageID: String?
     let hasMultipleIDs: Bool
+
+    enum Match {
+        case missing
+        case ambiguous
+        case unique(GmailMessage)
+    }
+
+    static func knownID(_ input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = trimmed.hasPrefix("<") ? trimmed : "<\(trimmed)>"
+        let range = NSRange(id.startIndex..., in: id)
+        return pattern.firstMatch(in: id, options: .anchored, range: range)?.range == range ? id : nil
+    }
+
+    // Candidates include malformed headers so an uncertain duplicate blocks a match.
+    static func match(_ id: String, among candidates: [Self]) -> Match {
+        guard let candidate = candidates.first else { return .missing }
+        guard candidates.count == 1, candidate.messageID == id else { return .ambiguous }
+        return .unique(candidate.message)
+    }
 
     init(_ message: GmailMessage) {
         let headers = message.messageIDHeaders.map(Self.parse)
