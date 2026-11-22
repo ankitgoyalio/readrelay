@@ -80,6 +80,65 @@ extension CLITests {
         XCTAssertTrue(replay.error.contains("use its current review code"), replay.error)
     }
 
+    func testReconnectRetriesAfterTheBetaLockIsReleasedAndIdentifiesTheSavedAccount() throws {
+        let home = try temporaryDirectory()
+        let directory = try approvalFixture(home: home, evidence: true, approved: true)
+        let config = directory.appendingPathComponent("config.json")
+        let savedConfig = try Data(contentsOf: config)
+        let state = directory.appendingPathComponent("state.sqlite")
+        let savedState = try Data(contentsOf: state)
+        let lock = open(directory.appendingPathComponent("beta.lock").path, O_CREAT | O_RDWR, 0o600)
+        defer { close(lock) }
+        XCTAssertGreaterThanOrEqual(lock, 0)
+        XCTAssertEqual(flock(lock, LOCK_EX | LOCK_NB), 0)
+
+        let blocked = try runCLI(["reconnect", "secondary"], home: home)
+        XCTAssertNotEqual(blocked.status, 0)
+        XCTAssertTrue(blocked.error.contains("Wait for the current ReadRelay command"), blocked.error)
+
+        XCTAssertEqual(flock(lock, LOCK_UN), 0)
+        let retried = try runCLI(["reconnect", "secondary"], home: home)
+        XCTAssertNotEqual(retried.status, 0)
+        XCTAssertTrue(retried.error.contains("secondary mailbox (secondary@example.com)"), retried.error)
+        XCTAssertTrue(retried.error.contains("Google Desktop OAuth client JSON"), retried.error)
+        XCTAssertTrue(try statusOutput(home: home).contains("Mode: Live"))
+        XCTAssertEqual(try Data(contentsOf: config), savedConfig)
+        XCTAssertEqual(try Data(contentsOf: state), savedState)
+    }
+
+    func testPreviewNamesTheAccountWhenItsDesktopClientCannotBeRead() throws {
+        let home = try temporaryDirectory()
+        try approvalFixture(home: home, evidence: true, approved: true)
+
+        let preview = try runCLI(["preview", "--unattended"], home: home)
+
+        XCTAssertNotEqual(preview.status, 0)
+        XCTAssertTrue(preview.error.contains("primary mailbox (primary@example.com)"), preview.error)
+        XCTAssertTrue(preview.error.contains("Restore the saved Desktop OAuth client JSON"), preview.error)
+        XCTAssertFalse(preview.error.contains("readrelay reconnect primary"), preview.error)
+    }
+
+    func testStatusMarksAnEarlierReconnectFailureAsFollowedBySuccess() throws {
+        let home = try temporaryDirectory()
+        let directory = try approvalFixture(home: home, evidence: true, approved: true)
+        let logs = directory.appendingPathComponent("logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let failureFile = logs.appendingPathComponent("latest-failure.json")
+        let message = "Could not access the secondary mailbox (secondary@example.com). "
+            + "Google rejected the refresh token. Run readrelay reconnect secondary."
+        let serviceSuccess = Date(timeIntervalSince1970: 1_700_000_001)
+        for secondsAfterSuccess in [1.0, -1.0] {
+            let date = serviceSuccess.addingTimeInterval(secondsAfterSuccess).timeIntervalSinceReferenceDate
+            let failure = try JSONSerialization.data(withJSONObject: ["date": date, "message": message])
+            try failure.write(to: failureFile)
+
+            let status = try statusOutput(home: home)
+            XCTAssertTrue(status.contains(message), status)
+            XCTAssertEqual(status.contains("(followed by a successful run)"), secondsAfterSuccess < 0, status)
+            XCTAssertTrue(status.contains("Mode: Live"), status)
+        }
+    }
+
     func testChangingTheLabelStartsInPreviewAndRejectsTheOldReviewCode() throws {
         let home = try temporaryDirectory()
         try approvalFixture(home: home, evidence: true, approved: true)
@@ -134,6 +193,7 @@ extension CLITests {
                                   secondary_email TEXT, cutoff_ms INTEGER, primary_label TEXT);
             INSERT INTO rollout VALUES (1, 'primary@example.com', 'secondary@example.com', 1700000000000, 'ReadRelay');
             CREATE TABLE previewed_backlog (original_id TEXT, copy_id TEXT, message_id TEXT, completed INTEGER);
+            INSERT INTO previewed_backlog VALUES ('pending-original', 'pending-copy', 'pending@example.com', 0);
             CREATE TABLE beta_scope (singleton INTEGER PRIMARY KEY, label_id TEXT, review_code TEXT,
                                      report_digest TEXT, approved_review_code TEXT, live_succeeded_at REAL);
             INSERT INTO beta_scope VALUES (1, 'Label_123', 'current-review', 'digest', NULL, NULL);

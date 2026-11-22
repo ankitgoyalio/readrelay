@@ -40,7 +40,8 @@ struct Status: ParsableCommand {
         if files.fileExists(atPath: failureFile.path) {
             let data = try Data(contentsOf: failureFile)
             let failure = try JSONDecoder().decode(ServiceFailure.self, from: data)
-            print("Latest failure: \(failure.date.ISO8601Format()) — \(failure.message)")
+            let recovery = lastSuccess.map { $0 > failure.date } == true ? " (followed by a successful run)" : ""
+            print("Latest failure: \(failure.date.ISO8601Format())\(recovery) — \(failure.message)")
         } else {
             print("Latest failure: None")
         }

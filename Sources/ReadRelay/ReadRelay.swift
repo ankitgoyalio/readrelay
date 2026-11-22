@@ -8,7 +8,7 @@ struct ReadRelay: AsyncParsableCommand {
         abstract: "Preview and sync read status for forwarded Gmail messages.",
         version: "0.1.0",
         subcommands: [
-            Setup.self, SetLabel.self, VerifyForwarding.self, Preview.self, Approve.self, Revoke.self, Status.self,
+            Setup.self, Reconnect.self, SetLabel.self, VerifyForwarding.self, Preview.self, Approve.self, Revoke.self, Status.self,
             Authorize.self, DryRun.self, Sync.self, LaunchAgent.self, ServiceRun.self
         ]
     )

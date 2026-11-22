@@ -6,33 +6,31 @@ struct RelayMailboxes {
     let readRelayLabelID: String
 
     init(configuration: Configuration, configPath: String, unattended: Bool, homebrew: Bool = false) async throws {
-        let primaryOAuth = try OAuth(role: .primary, configuration: configuration, configPath: configPath)
-        let secondaryOAuth = try OAuth(role: .secondary, configuration: configuration, configPath: configPath)
-        if unattended { try OAuth.preventKeychainPrompts() }
-        func connect(_ oauth: OAuth) async throws -> GmailMailbox {
-            do {
-                return try await oauth.mailbox()
-            } catch {
-                let command = homebrew ? "readrelay authorize \(oauth.role.rawValue)"
-                    : "readrelay authorize \(oauth.role.rawValue) --config <path>"
-                throw RelayError("\(error.localizedDescription) To reconnect this mailbox, run \(command).")
-            }
+        func configuredOAuth(_ role: MailboxRole) throws -> OAuth {
+            let command = homebrew ? "readrelay reconnect \(role.rawValue)"
+                : "readrelay authorize \(role.rawValue) --config <path>"
+            return try OAuth(role: role, configuration: configuration, configPath: configPath, reconnectCommand: command)
         }
-        primary = try await connect(primaryOAuth)
+        let primaryOAuth = try configuredOAuth(.primary)
+        let secondaryOAuth = try configuredOAuth(.secondary)
+        if unattended { try OAuth.preventKeychainPrompts() }
+        primary = try await primaryOAuth.mailbox()
         readRelayLabelID = try await primary.labelID(named: configuration.primaryLabel)
-        secondary = try await connect(secondaryOAuth)
+        secondary = try await secondaryOAuth.mailbox()
     }
 }
 
 struct GmailMailbox: Sendable {
-    let role: MailboxRole
+    let account: MailboxAccount
     let accessToken: String
 
-    func verifyAccount(expectedEmail: String) async throws {
+    var role: MailboxRole { account.role }
+
+    func verifyAccount() async throws {
         struct Profile: Decodable { let emailAddress: String }
         let profile: Profile = try await get("profile", query: [URLQueryItem(name: "fields", value: "emailAddress")])
-        guard profile.emailAddress.caseInsensitiveCompare(expectedEmail) == .orderedSame else {
-            throw RelayError("Google authorized a different account for the \(role.rawValue) mailbox.")
+        guard profile.emailAddress.caseInsensitiveCompare(account.email) == .orderedSame else {
+            throw account.grantFailure("Google authorized a different Gmail account.")
         }
     }
 
@@ -207,7 +205,7 @@ struct GmailMailbox: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(#"{"removeLabelIds":["UNREAD"]}"#.utf8)
-        let updated: GmailMessage = try await GoogleHTTP.send(request, operation: "secondary Gmail message modification")
+        let updated: GmailMessage = try await send(request, operation: "Gmail message modification")
         guard updated.id == id, !updated.isUnread else {
             throw RelayError("Gmail did not confirm removal of UNREAD from the forwarded copy.")
         }
@@ -215,8 +213,23 @@ struct GmailMailbox: Sendable {
     }
 
     private func get<Value: Decodable>(_ path: String, query: [URLQueryItem]) async throws -> Value {
-        try await GoogleHTTP.send(requestFor(path, query: query),
-                                  operation: "\(role.rawValue) Gmail \(path.split(separator: "/")[0]) request")
+        try await send(requestFor(path, query: query), operation: "Gmail \(path.split(separator: "/")[0]) request")
+    }
+
+    private func send<Value: Decodable>(_ request: URLRequest, operation: String) async throws -> Value {
+        do {
+            return try await GoogleHTTP.send(request, operation: operation)
+        } catch let error as GoogleHTTP.Failure {
+            switch error.cause {
+            case .http(401, _):
+                let reconnect = account.reconnectCommand.map { " If it persists, run \($0)." } ?? ""
+                throw account.failure(error.localizedDescription, nextStep: "Retry to refresh Gmail access.\(reconnect)")
+            case .http(403, "insufficientPermissions"), .http(403, "ACCESS_TOKEN_SCOPE_INSUFFICIENT"):
+                throw account.grantFailure(error.localizedDescription)
+            default:
+                throw account.googleFailure(error)
+            }
+        }
     }
 
     private func requestFor(_ path: String, query: [URLQueryItem]) -> URLRequest {

@@ -83,7 +83,11 @@ Check `readrelay status` for **Live** mode. The first live run handles the saved
 
 Pause background sync with `brew services stop ankitgoyalio/readrelay/readrelay`. Starting the service again preserves approval and pending work. To withdraw approval while leaving the schedule in place, run `readrelay revoke`. If a run is active, wait for it to finish and retry the revoke command. Once revoke succeeds, the service runs in **Preview** mode.
 
-If status says a mailbox needs reconnecting, run `readrelay authorize primary` or `readrelay authorize secondary` for that mailbox. In your browser, choose the same Gmail account. ReadRelay verifies the account and scope before saving the grant. The next service run uses the saved mode and pending work.
+## Reconnect a Gmail mailbox
+
+If `readrelay status` reports an expired or revoked grant, run the command it shows, `readrelay reconnect primary` or `readrelay reconnect secondary`. In your browser, choose the Gmail address shown in Terminal and grant the requested permission. ReadRelay uses the saved Desktop OAuth client and checks the account and scope before replacing that mailbox’s grant.
+
+If another ReadRelay command is running, wait for it to finish and retry. With the service running, check `readrelay status` after the next interval for a new successful run. The service resumes its saved mode and pending work, including any existing write approval.
 
 ## Change the mailbox pair or primary label
 

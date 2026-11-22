@@ -86,9 +86,17 @@ Use dedicated Gmail test mailboxes and the installed Homebrew build from a test 
 
 1. Run `readrelay preview` twice and try the first review code. Confirm that it is rejected. Review the current report and approve with the latest code.
 2. After the next Homebrew run, confirm that only the unique copy of the read original changed to read. Confirm that the unread control, missing matches, and ambiguous matches were skipped.
-3. Stage a newly forwarded pair. Stop and start the service, then read the original that was pending. Confirm that both the new eligible mail and the formerly unread original are handled. Repeat with a disconnected grant and reconnect the same mailbox using `readrelay authorize`. Check that status identifies the affected mailbox and that live sync resumes.
+3. Stage a newly forwarded pair. Stop and start the service, then read the original that was pending. Confirm that both the new eligible mail and the formerly unread original are handled.
 4. Revoke approval while the job is still registered. After revoke succeeds, stage a new read original with an unread copy. Wait for another successful scheduled run and confirm that status shows **Preview** and the copy stays unread.
 5. Change the primary label, or delete and recreate it with the same name. Confirm that the previous approval leaves the new label’s copies untouched. Run `readrelay set-label` with the new label name, verify forwarding, and repeat the approval flow to exercise the fresh scope.
+
+### Verify live reconnect (opt-in)
+
+Use an installed Homebrew build on a test macOS login, a dedicated Google Cloud project, and Gmail test accounts you control. Set up and approve sync as above. Leave one original and its matching copy unread until a successful live run has recorded it as pending.
+
+1. Disconnect the grant for one test mailbox in its Google Account, or wait for its Testing grant to expire while the other grant is still valid. Read the pending original and wait for a scheduled run. Confirm that the copy stays unread and `readrelay status` shows **Live** mode, the affected role and address, and `readrelay reconnect` with that role. Record the last successful run time.
+2. Run the suggested command. To check rejection, choose a separate test account that is outside the mailbox pair and has permission to authorize the test project. If Google offers granular consent, also try leaving the required permission unchecked for the configured account. Each attempt should fail. After a scheduled run, confirm that the copy is still unread and the success timestamp has stayed the same.
+3. Reconnect again with the configured account and its requested permission. Wait for a scheduled run. Confirm that status shows a newer successful run in **Live** mode and the pending copy has become read. Repeat for the other role with a fresh pending pair. If Keychain access requires interaction, follow the public guide’s [unattended preview steps](README.md#run-unattended-previews) and record that intervention with the result.
 
 ### Verify a known forwarding pair
 
