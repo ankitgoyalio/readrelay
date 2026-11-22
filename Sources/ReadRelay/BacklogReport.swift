@@ -118,22 +118,25 @@ struct BacklogReport: Encodable {
             guard originalIndex[id]?.count == 1 else {
                 return Entry(original: original.message, outcome: .ambiguousOriginal)
             }
-            guard let candidates = copyIndex[id], let copy = candidates.first else {
+            let copy: GmailMessage
+            switch IndexedMessage.match(id, among: copyIndex[id, default: []]) {
+            case .missing:
                 return Entry(original: original.message, messageID: id, outcome: .missingCopy)
-            }
-            guard candidates.count == 1, copy.messageID == id else {
+            case .ambiguous:
                 return Entry(original: original.message, messageID: id, outcome: .ambiguousCopy)
+            case .unique(let matched):
+                copy = matched
             }
 
             let outcome: Outcome
             if original.message.isUnread {
                 outcome = .originalUnread
-            } else if copy.message.isUnread {
+            } else if copy.isUnread {
                 outcome = .wouldMarkRead
             } else {
                 outcome = .copyAlreadyRead
             }
-            return Entry(original: original.message, copy: copy.message, messageID: id, outcome: outcome)
+            return Entry(original: original.message, copy: copy, messageID: id, outcome: outcome)
         }
 
         return Self(cutoffEpochMilliseconds: cutoff, entries: entries.sorted { $0.originalID < $1.originalID })
@@ -161,6 +164,26 @@ struct IndexedMessage {
     let candidates: [String]
     let messageID: String?
     let hasMultipleIDs: Bool
+
+    enum Match {
+        case missing
+        case ambiguous
+        case unique(GmailMessage)
+    }
+
+    static func knownID(_ input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = trimmed.hasPrefix("<") ? trimmed : "<\(trimmed)>"
+        let range = NSRange(id.startIndex..., in: id)
+        return pattern.firstMatch(in: id, options: .anchored, range: range)?.range == range ? id : nil
+    }
+
+    // Candidates include malformed headers so an uncertain duplicate blocks a match.
+    static func match(_ id: String, among candidates: [Self]) -> Match {
+        guard let candidate = candidates.first else { return .missing }
+        guard candidates.count == 1, candidate.messageID == id else { return .ambiguous }
+        return .unique(candidate.message)
+    }
 
     init(_ message: GmailMessage) {
         let headers = message.messageIDHeaders.map(Self.parse)

@@ -38,7 +38,7 @@ struct GmailMailbox: Sendable {
 
         let result: Labels = try await get("labels", query: [URLQueryItem(name: "fields", value: "labels(id,name)")])
         guard let label = result.labels.first(where: { $0.name == name }) else {
-            throw RelayError("The primary mailbox does not have the label “\(name)”. Create it in Gmail, add it to the forwarding filter, and run the preview again.")
+            throw RelayError("The primary mailbox does not have the label “\(name)”. Create it in Gmail, add it to the forwarding filter, and try again.")
         }
         return label.id
     }

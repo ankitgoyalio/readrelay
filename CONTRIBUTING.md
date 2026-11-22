@@ -80,6 +80,19 @@ See the [development launchd runbook](docs/launchd.md) for the manually managed 
 
 ## Seeded Gmail check
 
+### Verify a known forwarding pair
+
+Follow the [Gmail forwarding guide](README.md#set-up-and-verify-gmail-forwarding) with dedicated test mailboxes. The opt-in executable tests copy `config.json` and `oauth-client.json` from a directory created by `readrelay setup` and use the corresponding Keychain grants. Each test creates a fresh local preview in a temporary directory.
+
+For the recent-message check, use a label with exactly one original in the five-day window and mark both the original and its unique forwarded copy as read. For the empty-preview check, use a label whose only original is more than five days old and has a unique copy.
+
+```fish
+env READRELAY_FORWARDING_TEST_SETUP="/path/to/ReadRelay" READRELAY_FORWARDING_TEST_RECENT_MESSAGE_ID='<recent@example.com>' swift test --filter testVerifyForwardingAcceptsAnAlreadyReadPairAndPreservesItsLabels
+env READRELAY_FORWARDING_TEST_SETUP="/path/to/ReadRelay" READRELAY_FORWARDING_TEST_OLDER_MESSAGE_ID='<older@example.com>' swift test --filter testVerifyForwardingFindsAPairOutsideAnEmptyPreview
+```
+
+### Preview and sync seeded pairs
+
 The opt-in Gmail check uses known, labeled original messages in the five-day window and the existing copies in the secondary mailbox. Use a private expectations file containing an array of objects with `originalID`, `forwardedCopyID` (when a unique copy exists), and `outcome`. Include at least one read original with an unread copy and one unread original with an unread copy. Additional seeds can cover the other report outcomes.
 
 ```fish

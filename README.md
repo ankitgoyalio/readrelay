@@ -33,6 +33,20 @@ brew uninstall ankitgoyalio/readrelay/readrelay
 
 Uninstalling removes the executable. Your per-user configuration, SQLite sync state, logs, OAuth client file, and Keychain entries stay on your Mac. To remove your local setup entirely, remove the ReadRelay files for your login and delete its `io.ankitgoyal.readrelay.oauth` entries in Keychain Access. Deleting SQLite state also discards pending sync work. To revoke ReadRelay’s Gmail access, remove the OAuth grant in each Google Account.
 
+## Set up and verify Gmail forwarding
+
+1. In Gmail on the web, sign in to your primary mailbox. Under **Settings → See all settings → Forwarding and POP/IMAP**, add your secondary Gmail address as a forwarding address. Open the confirmation email in the secondary mailbox and confirm the address. For selective forwarding, keep mailbox-wide forwarding disabled. [Gmail forwarding help](https://support.google.com/mail/answer/10957)
+2. In the primary mailbox, create or edit a filter for the messages you want to forward. Select **Forward it** and choose your secondary Gmail address. Also select **Apply the label** and choose the primary label you configured in `readrelay setup`. The default label is `ReadRelay`. Create the label in Gmail if needed, then save the filter. [Gmail filter help](https://support.google.com/mail/answer/6579)
+3. Once the filter is saved, send a new email to the primary address from a sender that matches the filter. Include any subject or other details the filter requires. Confirm that Gmail applied the label to the original and that a copy arrived in the secondary mailbox.
+4. In the primary mailbox, open the test email. Use the message’s **More → Show original** menu and copy the **Message ID** value. [Gmail message header help](https://support.google.com/mail/answer/29436)
+5. Run the following command with that value in quotes. ReadRelay checks for one labeled original and exactly one matching forwarded copy, even if both are already read. The command leaves Gmail read status unchanged.
+
+   ```fish
+   readrelay verify-forwarding '<example-id@example.com>'
+   ```
+
+You can run `readrelay preview` before verification succeeds. If your earlier preview was empty, send a new message that matches the filter and verify it using the steps above.
+
 ## Contribute
 
 See [Contributing](CONTRIBUTING.md) for source builds, offline tests, and opt-in Gmail checks.
