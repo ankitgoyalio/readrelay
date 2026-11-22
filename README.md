@@ -33,6 +33,17 @@ brew uninstall ankitgoyalio/readrelay/readrelay
 
 Uninstalling removes the executable. Your per-user configuration, SQLite sync state, logs, OAuth client file, and Keychain entries stay on your Mac. To remove your local setup entirely, remove the ReadRelay files for your login and delete its `io.ankitgoyal.readrelay.oauth` entries in Keychain Access. Deleting SQLite state also discards pending sync work. To revoke ReadRelay’s Gmail access, remove the OAuth grant in each Google Account.
 
+## Create your Google OAuth client
+
+Use a Google Cloud project you own and start with **External** access in **Testing** for the initial beta verification.
+
+1. Create a Google Cloud project and enable the **Gmail API** in it. [Google's Gmail API setup](https://developers.google.com/workspace/gmail/api/quickstart/go#enable_the_api)
+2. In **Google Auth platform**, configure **Branding** with an app name, support email, and contact email. Select **External** under **Audience**, keep the publishing status at **Testing**, and add both Gmail addresses under **Test users**. [Google Auth platform setup](https://support.google.com/cloud/answer/15544987), [Audience and test users](https://support.google.com/cloud/answer/15549945)
+3. Under **Data Access → Add or Remove Scopes**, add `https://www.googleapis.com/auth/gmail.metadata` and `https://www.googleapis.com/auth/gmail.modify`. ReadRelay requests the metadata scope for the primary mailbox and the modify scope for the secondary mailbox. [Configure consent and scopes](https://developers.google.com/workspace/guides/configure-oauth-consent), [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+4. Under **Clients → Create client**, select **Desktop app**, name the client, and download its JSON file. Keep that file private. Supply the same file to `readrelay setup` for both mailboxes and authorize each Gmail account separately when the browser prompts you. [Google's desktop client setup](https://developers.google.com/identity/protocols/oauth2/native-app#creatingcred)
+
+In **Testing**, each refresh token expires seven days after its account grants consent because ReadRelay requests Gmail scopes. Run the initial checks within that window and reconnect the affected mailbox if authorization expires. Google may show a warning when you authorize an unverified project. Review the project name, account, and requested access before granting consent. [Refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration), [Google's unverified app warning](https://support.google.com/cloud/answer/7454865)
+
 ## Set up and verify Gmail forwarding
 
 1. In Gmail on the web, sign in to your primary mailbox. Under **Settings → See all settings → Forwarding and POP/IMAP**, add your secondary Gmail address as a forwarding address. Open the confirmation email in the secondary mailbox and confirm the address. For selective forwarding, keep mailbox-wide forwarding disabled. [Gmail forwarding help](https://support.google.com/mail/answer/10957)
