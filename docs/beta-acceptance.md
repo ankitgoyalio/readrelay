@@ -1,6 +1,6 @@
 # Clean-login acceptance for the macOS beta
 
-This opt-in checklist covers [issue #18](https://github.com/ankitgoyalio/readrelay/issues/18). Run it after the planned `v0.1.0` prerelease and Homebrew formula are public. Record one result per tested macOS version.
+This opt-in checklist covers [issue #18](https://github.com/ankitgoyalio/readrelay/issues/18). Use the published prerelease and Homebrew formula. Record one result per tested macOS version.
 
 Use a clean login on an Apple silicon Mac with Homebrew, with no prior ReadRelay setup, state, Keychain grants, or service. Use a Google Cloud project you own, two distinct Gmail test mailboxes you control, and a separate sender account you control. Use synthetic message text and a secondary mailbox dedicated to the test. Google's **External / Testing** setup is suitable for this check. Finish within seven days of consent. The [production OAuth longevity check](../CONTRIBUTING.md#verify-production-oauth-past-day-seven) has its own evidence.
 
