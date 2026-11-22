@@ -17,7 +17,7 @@ The script builds a native release executable using the committed SwiftPM lockfi
 
 ## Publish the GitHub Release and update the tap
 
-1. Create the `v0.1.0` tag at the build commit. Upload `readrelay-0.1.0-macos-arm64.tar.gz` and its `.sha256` file to the GitHub Release in `ankitgoyalio/readrelay`. The formula uses this release asset URL.
+1. Create the `v0.1.0` tag at the build commit. Upload `readrelay-0.1.0-macos-arm64.tar.gz` and its `.sha256` file to the GitHub Release in `ankitgoyalio/readrelay` and mark the public beta as a prerelease. The formula uses this release asset URL.
 2. Use the project-owned public tap repository `ankitgoyalio/homebrew-readrelay`, which maps to the Homebrew tap `ankitgoyalio/readrelay`. On first publication, create the repository if needed and add the generated `Formula/readrelay.rb` at that path. On upgrades, apply the generated URL, version, and checksum to the existing formula and preserve its service block. Commit and push the formula in the tap repository. [Homebrew tap maintenance](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap)
 3. Follow the clean-install checklist below before listing verified macOS versions. Run `brew test ankitgoyalio/readrelay/readrelay` to check that the installed executable reports the formula version.
 
@@ -27,7 +27,7 @@ The [formula template](../packaging/homebrew/readrelay.rb.in) includes the servi
 
 Use a clean Apple silicon macOS login with Homebrew and its prerequisites. Use only the public release and tap. Run the commands in the [install guide](../README.md), compare the reported version to the release tag without its `v` prefix, and confirm the executable comes from Homebrew with `command -v readrelay`. Check that installation downloads the archive and performs no Swift compilation.
 
-Record the ReadRelay version, macOS version and build from `sw_vers`, and result in the GitHub Release notes. List only macOS versions verified this way. When testing a subsequent release, verify the documented upgrade from the previous release and confirm that uninstall leaves per-user data in place.
+Record the ReadRelay version, macOS version and build from `sw_vers`, and result in the GitHub Release notes. List only macOS versions verified this way. Use the [clean-login acceptance checklist](beta-acceptance.md) to verify the full Gmail and background service workflow. When testing a subsequent release, verify the documented upgrade from the previous release and confirm that uninstall leaves per-user data in place.
 
 ## Verify unattended previews
 

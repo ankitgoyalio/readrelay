@@ -80,23 +80,13 @@ See the [development launchd runbook](docs/launchd.md) for the manually managed 
 
 ## Seeded Gmail check
 
-### Verify Homebrew approval and revoke
+### Verify the published beta
 
-Use dedicated Gmail test mailboxes and the installed Homebrew build from a test macOS login. Stage a labeled read original with one unread forwarded copy, another labeled original that stays unread, and originals with missing or ambiguous matches. Verify forwarding with a known unique pair. Start the Homebrew service and wait for a successful preview. Check that the copies are still unread.
+Use the opt-in [clean-login acceptance checklist](docs/beta-acceptance.md) for the full Homebrew and Gmail workflow. The checks below exercise additional cases with dedicated test mailboxes.
 
-1. Run `readrelay preview` twice and try the first review code. Confirm that it is rejected. Review the current report and approve with the latest code.
-2. After the next Homebrew run, confirm that only the unique copy of the read original changed to read. Confirm that the unread control, missing matches, and ambiguous matches were skipped.
-3. Stage a newly forwarded pair. Stop and start the service, then read the original that was pending. Confirm that both the new eligible mail and the formerly unread original are handled.
-4. Revoke approval while the job is still registered. After revoke succeeds, stage a new read original with an unread copy. Wait for another successful scheduled run and confirm that status shows **Preview** and the copy stays unread.
-5. Change the primary label, or delete and recreate it with the same name. Confirm that the previous approval leaves the new label’s copies untouched. Run `readrelay set-label` with the new label name, verify forwarding, and repeat the approval flow to exercise the fresh scope.
-
-### Verify live reconnect (opt-in)
-
-Use an installed Homebrew build on a test macOS login, a dedicated Google Cloud project, and Gmail test accounts you control. Set up and approve sync as above. Leave one original and its matching copy unread until a successful live run has recorded it as pending.
-
-1. Disconnect the grant for one test mailbox in its Google Account, or wait for its Testing grant to expire while the other grant is still valid. Read the pending original and wait for a scheduled run. Confirm that the copy stays unread and `readrelay status` shows **Live** mode, the affected role and address, and `readrelay reconnect` with that role. Record the last successful run time.
-2. Run the suggested command. To check rejection, choose a separate test account that is outside the mailbox pair and has permission to authorize the test project. If Google offers granular consent, also try leaving the required permission unchecked for the configured account. Each attempt should fail. After a scheduled run, confirm that the copy is still unread and the success timestamp has stayed the same.
-3. Reconnect again with the configured account and its requested permission. Wait for a scheduled run. Confirm that status shows a newer successful run in **Live** mode and the pending copy has become read. Repeat for the other role with a fresh pending pair. If Keychain access requires interaction, follow the public guide’s [unattended preview steps](README.md#run-unattended-previews) and record that intervention with the result.
+- To check review code freshness, run `readrelay preview` twice after verifying forwarding and seeing a successful Homebrew preview. Confirm approval with the first code is rejected. Review the current report and approve with the latest code.
+- To check a changed scope, change the primary label or delete and recreate it with the same name. Confirm the previous approval leaves the new label's copies unread. Follow the [public guide](README.md#change-the-mailbox-pair-or-primary-label) to verify the new scope and review it before approval.
+- To check reconnect rejection, use the checklist's disconnected-grant case. First reconnect with a separate test account outside the mailbox pair that has permission to authorize the test project. If Google offers granular consent, also try leaving the required permission unchecked for the configured account. Each attempt should fail. Confirm that the pending copy stays unread and no new success is recorded before reconnecting with the correct account and scope. Repeat with the other role and a fresh pending pair if testing both roles.
 
 ### Verify a known forwarding pair
 
@@ -145,11 +135,7 @@ A static set of seeded Gmail messages does not establish when a copy arrived, wh
 
 1. Install the published build using the [Homebrew install guide](README.md#install-the-macos-beta). Record the release version and macOS version. Use a login with no previous ReadRelay configuration, state, or Keychain grants.
 2. Enable the Gmail API and configure the scopes and one **Desktop app** client as in [Create your Google OAuth client](README.md#create-your-google-oauth-client). For this check, use a separate project dedicated to the two test mailboxes and set its **External** audience to **In production** before either authorization. Google makes the project available to Google Accounts in this mode. Keep the client JSON private and do not distribute it. Proceed only within Google's verification rules. If Google or the account administrator blocks authorization, record the block and end the attempt. [Google publishing status](https://support.google.com/cloud/answer/15549945), [Restricted-scope verification and exceptions](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification)
-3. Run the installed CLI with the same client file for both accounts. Select the intended account at each consent prompt. Record each grant's consent time in UTC and any warning or error, with private details removed. Set up the test label and use the [forwarding guide](README.md#set-up-and-verify-gmail-forwarding) to verify one labeled original and its unique forwarded copy.
-
-   ```fish
-   readrelay setup --oauth-client-file '/path/to/client.json' --primary-email 'primary@example.com' --secondary-email 'secondary@example.com'
-   ```
+3. Follow [Connect your mailboxes](README.md#connect-your-mailboxes) with the same client file for both accounts. Select the intended account at each consent prompt. Record each grant's consent time in UTC and any warning or error, with private details removed. Set up the test label and use the [forwarding guide](README.md#set-up-and-verify-gmail-forwarding) to verify one labeled original and its unique forwarded copy.
 
 4. Follow [Run unattended previews](README.md#run-unattended-previews) to start the installed Homebrew service from the test login. Check `brew services list` for registration and use `readrelay status` to record a successful service preview in UTC on the day you authorize both accounts. If you grant Keychain access during setup, capture the baseline after that step.
 5. Keep the same client, mailbox pair, and grants for the duration. After **more than 168 hours from the later consent time**, leave the Mac awake and logged in for a scheduled run. Use `readrelay status` and the latest service log to verify a new unattended preview completed after the deadline without browser or Keychain prompts. Use the success timestamp from the scheduled job as evidence that it refreshed and verified both mailbox grants. If either mailbox must reconnect or a grant is replaced, start a new attempt with fresh consent times.
